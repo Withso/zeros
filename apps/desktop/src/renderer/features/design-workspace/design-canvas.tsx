@@ -6511,9 +6511,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         syncStructureModifier(designStructureModifierPressed(event));
       }
       const activeElement = document.activeElement;
+      // A committed field can blur all the way to BODY. With no other focus
+      // owner, the visible design surface still owns its canvas shortcuts.
       const designSurfaceFocused =
         activeElement instanceof Element &&
-        Boolean(activeElement.closest("[data-design-workspace-surface]"));
+        (activeElement === document.body ||
+          Boolean(activeElement.closest("[data-design-workspace-surface]")));
       const shortcutView = designWorkspaceView(workspaceId);
       const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
       const selectedNodeIsTarget = Boolean(shortcutFrame && shortcutView.selectedNodeId);
@@ -6590,7 +6593,23 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return;
       }
       if (editableTarget) return;
-      if (!viewport.contains(document.activeElement)) return;
+      const arrowShortcut = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key);
+      const toolShortcut =
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        (["v", "t", "f", "a"].includes(event.key.toLowerCase()) || event.code === "KeyR");
+      const panelControlKeepsArrows =
+        event.target instanceof Element &&
+        event.target.closest('[data-design-panel-resize], [role="separator"]');
+      // Panel controls keep focus for their rings and for Tab/Escape, while
+      // canvas-owned tool and nudge keys still act without a click back.
+      const panelShortcutFocus =
+        designSurfaceFocused &&
+        (arrowShortcut || toolShortcut) &&
+        !panelControlKeepsArrows;
+      if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();
         finishNodeNudge(true);

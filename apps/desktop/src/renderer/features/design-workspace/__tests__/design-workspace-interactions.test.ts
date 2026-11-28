@@ -221,7 +221,9 @@ describe("design workspace interaction wiring", () => {
     // Before the focus gate: a drag is as often started from a Layers
     // selection, which leaves focus outside the canvas viewport entirely.
     expect(guard).toBeLessThan(
-      source.indexOf("if (!viewport.contains(document.activeElement)) return;"),
+      source.indexOf(
+        "if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;",
+      ),
     );
     expect(guard).toBeLessThan(
       source.indexOf(
@@ -231,6 +233,17 @@ describe("design workspace interaction wiring", () => {
     // One owner, not one listener per gesture: the three that had wired their
     // own window keydown are covered by the same guard.
     expect(source).not.toContain('if (keyboardEvent.key !== "Escape") return;');
+  });
+
+
+  it("scopes tool and nudge shortcuts to the visible design surface", () => {
+    expect(source).toContain("activeElement === document.body");
+    expect(source).toContain("const arrowShortcut =");
+    expect(source).toContain("const toolShortcut =");
+    expect(source).toContain("!panelControlKeepsArrows");
+    expect(source).toContain(
+      "if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;",
+    );
   });
 
   it("routes copy, duplicate, and delete through the active semantic selection", () => {

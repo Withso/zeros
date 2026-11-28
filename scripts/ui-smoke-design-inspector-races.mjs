@@ -45,6 +45,11 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
   await input.fill("12");
   await input.press("Enter");
   await expect.poll(spacing, { timeout: 300 }).toBe("12px");
+  await page.keyboard.press("r");
+  await expect(page.getByRole("button", { name: "Rectangle tool", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("v");
+  await expect(page.getByRole("button", { name: "Select", exact: true })).toHaveAttribute("aria-pressed", "true");
+  check("canvas tool shortcuts work after an inspector field commits", true);
   await field.getByLabel("Unit for Word gap").click();
   // The menu converts the value: 12px is 0.75rem at the 16px root.
   await page.getByRole("option", { name: "rem", exact: true }).click();
