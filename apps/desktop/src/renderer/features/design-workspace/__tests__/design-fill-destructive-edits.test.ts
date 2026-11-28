@@ -92,7 +92,7 @@ describe("destructive fill edits", () => {
     const details = detailsFor(
       {
         backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
-        backgroundImage: "none",
+        backgroundImage: existing,
       },
       {
         authoredStyles: {
@@ -271,6 +271,38 @@ describe("destructive fill edits", () => {
     await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!.click());
     expect(document.querySelector<HTMLInputElement>('input[aria-label="Start stop opacity value"]')?.disabled).toBe(true);
     expect(document.querySelector<HTMLInputElement>('input[aria-label="Gradient angle value"]')?.disabled).toBe(false);
+  });
+
+
+  it("keeps text Fill on lettering when background-image is explicitly none", async () => {
+    const details = detailsFor(
+      { backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none", color: "#FFFFFF" }, // check:ui ignore-line -- CSSOM fixture
+      { text: "Save changes", textEditable: true, authoredStyleProperties: ["background-image", "color"] },
+    );
+    const onCommit = await renderEditor(details);
+    const opacity = document.querySelector<HTMLInputElement>('input[aria-label="Fill opacity"]')!;
+    await act(async () => setInputValue(opacity, "40"));
+    await act(async () => opacity.blur());
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<string, string | null>;
+    expect(written).toHaveProperty("color");
+    expect(written).not.toHaveProperty("background-color");
+  });
+
+  it("keeps named gradient stop colours editable", async () => {
+    const authored = "linear-gradient(135deg, red, blue)";
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: "linear-gradient(135deg, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: { "background-image": { origin: "inline", value: authored } },
+      },
+    );
+    await renderEditor(details);
+    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!.click());
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Start stop opacity value"]')?.disabled).toBe(false);
   });
 
 });

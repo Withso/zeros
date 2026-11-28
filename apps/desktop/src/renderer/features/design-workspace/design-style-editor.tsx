@@ -298,8 +298,7 @@ export function DesignStyleEditor({
   const fillTargetsText =
     textLayer &&
     designFillIsEmpty(backgroundFillColor, editableFillImage) &&
-    !isAuthored("background-color") &&
-    !isAuthored("background-image");
+    !isAuthored("background-color");
   const fillProperty = fillTargetsText ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
   const confirmedFillColor = styleValue(

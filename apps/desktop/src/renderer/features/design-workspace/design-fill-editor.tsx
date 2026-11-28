@@ -143,6 +143,7 @@ export function DesignFillEditor({
   const painted = fillType === "solid" ? "background-color" : "background-image";
   const origin = useDesignFieldOrigin(painted, FILL_PROPERTIES);
   const gradient = parseDesignGradient(editableImage);
+  const resolvedGradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
       <DesignColorSwatch value={color} mixed={mixed} className="size-full" />
@@ -162,6 +163,7 @@ export function DesignFillEditor({
       size={size}
       repeat={repeat}
       disabled={disabled}
+      resolvedGradient={resolvedGradient}
       tokenName={tokenName}
       onPreview={onPreview}
       onCancelPreview={onCancelPreview}
@@ -220,6 +222,7 @@ export function DesignFillEditor({
 }
 
 interface DesignFillPopoverProps extends DesignFillEditorProps {
+  resolvedGradient: DesignGradientValue | null;
   trigger: React.ReactNode;
 }
 
@@ -230,6 +233,7 @@ function DesignFillPopover({
   size,
   repeat,
   disabled,
+  resolvedGradient,
   tokenName,
   trigger,
   onPreview,
@@ -514,9 +518,13 @@ function DesignFillPopover({
               {unsupportedGradient ? null : (
                 <DesignColorPanel
                   key={stop}
-                  value={gradient[stop]}
+                  value={
+                    parseDesignColor(gradient[stop])
+                      ? gradient[stop]
+                      : (resolvedGradient?.[stop] ?? gradient[stop])
+                  }
                   label={stop === "start" ? "Start stop" : "End stop"}
-                  disabled={disabled || !parseDesignColor(gradient[stop])}
+                  disabled={disabled || gradient[stop].includes("var(")}
                   panelRef={panelRef}
                   onPreview={(next) =>
                     void updateGradient({ [stop]: next }, false)
