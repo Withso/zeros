@@ -16,6 +16,7 @@ import {
 import path from "node:path";
 import os from "node:os";
 import { gitProcessOptions } from "../git/git-process-options";
+import { withWorkspaceCeiling } from "../git/workspace-ceiling";
 import { gitProbeFailure } from "../git/git-exec";
 import { isTransientWorktreeRegistryRead } from "../git/worktree-registry";
 import {
@@ -49,7 +50,7 @@ function git(root: string, args: string[]): string {
       return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
         cwd: root,
         encoding: "utf8",
-        ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
+        env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env),
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 5_000,
       }).trim();

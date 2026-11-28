@@ -5,9 +5,18 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runGit, runGitProbeSync } from "../git-exec";
 import { setStateRootForTesting, worktreesRoot } from "../state";
+import { setManagedWorkspaceRootsForTesting, withWorkspaceCeiling } from "../workspace-ceiling";
 
+// Fixture Git must never follow an inherited repository selection (for example
+// when the suite runs inside a Git hook) into an unrelated repository.
+const fixtureEnv = (): NodeJS.ProcessEnv => {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"]) delete env[key];
+  return env;
+};
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  execFileSync("git", args, { cwd, encoding: "utf8", env: fixtureEnv() }).trim();
 
 // A Zeros workspace folder sits inside the managed workspaces root. When its
 // `.git` link is lost, Git must not walk up and adopt whatever repository
@@ -74,4 +83,30 @@ describe("runGit inside the managed workspaces root", () => {
     const enclosingTop = await runGit(path.join(enclosing, "state"), ["rev-parse", "--show-toplevel"]);
     expect(realpathSync(enclosingTop.stdout.trim())).toBe(enclosing);
   });
+
+  it("protects a workspaces root whose path contains the list delimiter through its nearest listable ancestor", async () => {
+    const odd = path.join(enclosing, "zeros:local");
+    mkdirSync(odd);
+    setStateRootForTesting(odd);
+    const broken = path.join(worktreesRoot(), "source-repo", "broken");
+    mkdirSync(broken, { recursive: true });
+    await expect(runGit(broken, ["rev-parse", "--show-toplevel"])).rejects.toThrow();
+  });
 });
+
+describe("withWorkspaceCeiling", () => {
+  afterEach(() => setManagedWorkspaceRootsForTesting(null));
+
+  it("keeps an inherited ceiling list, including its empty no-symlink marker, after the managed roots", () => {
+    setManagedWorkspaceRootsForTesting(["/managed/workspaces"]);
+    expect(withWorkspaceCeiling({ GIT_CEILING_DIRECTORIES: ":/slow/network" }).GIT_CEILING_DIRECTORIES)
+      .toBe(`/managed/workspaces${path.delimiter}:/slow/network`);
+  });
+
+  it("lists the nearest listable ancestor of a root that contains the delimiter, and resolves relative roots", () => {
+    setManagedWorkspaceRootsForTesting([`/outer/zeros${path.delimiter}local/workspaces`, "relative/workspaces"]);
+    expect(withWorkspaceCeiling({}).GIT_CEILING_DIRECTORIES)
+      .toBe(["/outer", path.resolve("relative/workspaces")].join(path.delimiter));
+  });
+});
+
