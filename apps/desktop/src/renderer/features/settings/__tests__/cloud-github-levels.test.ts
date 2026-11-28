@@ -97,6 +97,7 @@ describe("GitHub at two levels in Settings", () => {
       await click("Link @acme");
       expect(document.querySelector('[role="dialog"]')?.textContent).toContain("GitHub App sign-in");
       await click("Configure account identity");
+      await act(async () => { await new Promise(resolve => requestAnimationFrame(() => resolve(null))); });
       expect(fixtures.configure).toHaveBeenCalledOnce();
       expect(fixtures.connect).not.toHaveBeenCalled();
     } finally { fixtures.cloudMethod = "github-app"; }
@@ -150,10 +151,16 @@ describe("GitHub at two levels in Settings", () => {
     fixtures.connections = { organization: [connection(USER, "acme", "organization")], personal: [], solo: false };
     fixtures.configure.mockClear();
     fixtures.open.mockClear();
+    let dialogOpenAtCall: boolean | null = null;
+    fixtures.configure.mockImplementation(() => { dialogOpenAtCall = !!document.querySelector('[role="dialog"]'); });
     await page("denied-switch", false);
     await click("View @acme");
     await click("Configure account identity");
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(() => resolve(null))); });
     expect(fixtures.configure).toHaveBeenCalledOnce();
+    // Called once the sheet is gone, so its focus trap can't pull focus back into it.
+    expect(dialogOpenAtCall).toBe(false);
+    fixtures.configure.mockReset();
     expect(fixtures.open).not.toHaveBeenCalled();
   });
 

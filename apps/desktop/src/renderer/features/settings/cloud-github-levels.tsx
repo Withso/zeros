@@ -102,7 +102,8 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
     return !!status && !identity.read.readError && !app;
   }
   const close = () => { setSheet(null); setHandoffError(null); };
-  const configureIdentity = () => { close(); onConfigureIdentity?.(); };
+  // After the sheet has unmounted, so its focus trap doesn't take focus back.
+  const configureIdentity = () => { close(); requestAnimationFrame(() => onConfigureIdentity?.()); };
   // Selecting a saved App completes sign-in. A bound connection then opens its ordinary details.
   const showDetails = sheet?.kind === "view" || (sheet?.kind === "link" && selected?.installationId != null && app);
   const selectedHint = selected && accessHint(selected);

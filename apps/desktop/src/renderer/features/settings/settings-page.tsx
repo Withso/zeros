@@ -1453,7 +1453,8 @@ function IntegrationsPanel({ surfaceActive = true, unified = false }: { surfaceA
   const page = useRef<HTMLDivElement>(null);
   // The identity controls are on this page: bring the Cloud method into view instead of navigating.
   const configureIdentity = useCallback(() => {
-    const target = page.current?.querySelector<HTMLElement>('[aria-label="Cloud method"], [aria-label="Cloud GitHub authentication method"]');
+    // The separate adapter's method group isn't focusable itself; take its first enabled control.
+    const target = page.current?.querySelector<HTMLElement>('[aria-label="Cloud method"], [aria-label="Cloud GitHub authentication method"] button:not([disabled])');
     target?.scrollIntoView({ block: "center" });
     target?.focus({ preventScroll: true });
   }, []);
