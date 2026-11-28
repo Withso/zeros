@@ -115,7 +115,7 @@ import { turnGet } from "../../platform/turns";
 import { refreshChatTurnRows, turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Check, GitBranch } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check, Frame, GitBranch } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -915,6 +915,10 @@ function AgentChatBody({
     }, [chatId, readOnly]),
   });
   const pinDesignFrame = designFrameContext.pin;
+  const attachDesignFrame = designFrameContext.attach;
+  const designFrameAttachAvailable = Boolean(
+    chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd),
+  );
   const preparationOwner = JSON.stringify([
     chatId,
     session.agentId ?? chatThread?.agentId,
@@ -1876,6 +1880,23 @@ function AgentChatBody({
    *  encoding awaits would double-apply the edit). */
   const queueSaveInFlightRef = useRef(false);
   const queueEditGenerationRef = useRef(0);
+  useEffect(() => {
+    if (!designFrameAttachAvailable || !surfaceActive || readOnly || editingQueuedId) return;
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
+      if (event.code !== "KeyF" || hasShortcutPriorityClaim()) return;
+      if (!designFrameContext.canAttach) return;
+      if (!(event.target instanceof Element)) return;
+      const designSurface = event.target.closest("[data-design-workspace-surface]");
+      const inOwnDesignSurface = designSurface?.getAttribute("data-design-workspace-id") === designFrameContext.workspaceId;
+      if (inOwnDesignSurface && activeChatId !== chatId) return;
+      if (!composerDockRef.current?.contains(event.target) && !inOwnDesignSurface) return;
+      event.preventDefault();
+      attachDesignFrame();
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [designFrameAttachAvailable, surfaceActive, readOnly, editingQueuedId, designFrameContext.canAttach, designFrameContext.workspaceId, activeChatId, chatId, attachDesignFrame]);
   const queueKeysRef = useRef({
     arrowUp: (): boolean => false,
     arrowDown: (): boolean => false,
@@ -5115,6 +5136,21 @@ function AgentChatBody({
                         onDesign={chatId && capabilitiesBridge && !isCloudWorkspace(chatThread?.folder ?? session.cwd) ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
+                      {designFrameAttachAvailable && !editingQueuedId && (
+                        <Tooltip label="Attach selected frame" shortcut="⌘⇧F">
+                          <IconButton
+                            type="button"
+                            size="standard"
+                            label="Attach selected frame"
+                            aria-keyshortcuts="Meta+Shift+F Control+Shift+F"
+                            disabled={!designFrameContext.canAttach}
+                            onClick={attachDesignFrame}
+                            onMouseDown={event => event.preventDefault()}
+                          >
+                            <Frame />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                       {chatThread?.composerMode === "design" && <ComposerDesignTag onRemove={leaveDesignMode} />}
                       <input
                         ref={fileInputRef}

@@ -104,6 +104,8 @@ export async function runDesignSavedEditingOwnerAdmissionSmoke({ page, check }) 
       await control.mouse.down();
       await control.mouse.move(pricing.x + pricing.width + 12, pricing.y - 12, { steps: 12 });
       await control.mouse.up();
+      await expect.poll(async () => control.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts")).designWorkspaceView("ws_design_harness").selectedTargets.length)).toBe(2);
+      await control.getByRole("button", { name: "Attach selection", exact: true }).click();
       await expect(control.locator("[data-composer-design-frame]")).toHaveText("2 selected");
       check(`${entry} directory admission preserves the canonical two-frame marquee`, true);
     } finally {
