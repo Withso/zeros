@@ -19,6 +19,12 @@ beforeEach(() => {
 });
 
 describe("synchronous chat boot cache", () => {
+  it("keeps a side chat a side chat across a relaunch", () => {
+    const chat = sanitizeCachedChat({ id: "side", folder: "/workspace", title: "Side chat", kind: "side", sourceChatId: "source" });
+    expect(chat?.kind).toBe("side");
+    expect(sanitizeCachedChat({ id: "t", folder: "/workspace", kind: "terminal" })?.kind).toBe("terminal");
+    expect(sanitizeCachedChat({ id: "x", folder: "/workspace", kind: "unknown" })?.kind).toBe("chat");
+  });
   it("does not restore cloud conversations before account authorization", () => {
     const cloud = { id: "cloud-chat", folder: "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", title: "Private" };
     setSetting(CHATS_STORAGE_KEY, [cloud]); setSetting(CHATS_BACKUP_KEY, [cloud]);

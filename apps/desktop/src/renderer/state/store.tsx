@@ -402,8 +402,12 @@ export type ChatThread = {
    *  terminal-agent tab — `agentId` holds a terminal-agents catalog id
    *  and ChatView mounts a `TerminalSessionView` instead of
    *  `AgentChat`. The two paths share the tab strip + history surface so
-   *  the user manages both with one mental model. */
-  kind?: "chat" | "terminal";
+   *  the user manages both with one mental model. `"side"` is an agent
+   *  chat shown only as a Workbench side chat tab: it is never a session, so
+   *  the session tree, its menus and the Agents tab leave it out. Older builds
+   *  read it as `"chat"`; with no parent link they list it as a parent
+   *  session. */
+  kind?: "chat" | "terminal" | "side";
   /** agent id bound to this chat. null means "pick the default agent
    *  when the session first starts" — set once and immutable thereafter.
    *  For `kind: "terminal"` this is a terminal-agents catalog id

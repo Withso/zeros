@@ -43,7 +43,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
     "the 280px add menu aligns below plus with the requested radius and search height",
     true,
   );
-  await expect(menu.getByRole("option")).toHaveCount(6);
+  await expect(menu.getByRole("option")).toHaveCount(7);
   for (const name of ["iOS Simulator", "Android Simulator"]) {
     await expect(
       menu
@@ -51,8 +51,21 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
         .locator("svg.lucide-smartphone"),
     ).toBeVisible();
   }
+  const sideChat = page.getByRole("option", { name: "Side chat", exact: true });
+  await expect(sideChat.locator("svg.lucide-message-circle")).toBeVisible();
+  await sideChat.hover();
+  const sideChats = page.getByRole("menu", { name: "Side chats" });
+  await expect(sideChats).toBeVisible();
+  await expect(sideChats).toHaveCSS("width", "280px");
+  await expect(sideChats).toHaveAttribute("data-side", "right");
+  await expect(sideChats.getByRole("menuitem", { name: "New side chat" })).toBeVisible();
+  check(
+    "Side chat opens its 280px submenu with New side chat and the workspace's side chats",
+    true,
+  );
   await expect(environment.locator("svg.lucide-play")).toBeVisible();
   await environment.hover();
+  await expect(sideChats).toBeHidden();
   await expect(submenu).toBeVisible();
   await expect(submenu).toHaveCSS("width", "280px");
   await expect(submenu).toHaveCSS("border-top-left-radius", "12px");
@@ -202,7 +215,7 @@ export async function runNewTabEnvironmentSmoke({ page, check }) {
     menu.getByRole("option", { name: "Build", exact: true }),
   ).toBeVisible();
   await search.fill("   ");
-  await expect(menu.getByRole("option")).toHaveCount(6);
+  await expect(menu.getByRole("option")).toHaveCount(7);
   check(
     "action search follows live names and icons, supports fuzzy matches, and restores the default menu when cleared",
     true,

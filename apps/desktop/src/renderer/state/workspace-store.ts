@@ -224,7 +224,13 @@ export type Action =
     }
   | { type: "SET_ACTIVE_CHAT"; id: string | null }
   /** Publish a side chat and its Workbench tab, focused, in one transition. */
-  | { type: "OPEN_SIDE_CHAT"; chat: ChatThread }
+  | {
+      type: "OPEN_SIDE_CHAT";
+      chat: ChatThread;
+      /** A side chat this one replaces (/clear, a model switch): its tab now shows this chat. */
+      replaceChatId?: string;
+      recordWorkspaceActivity?: boolean;
+    }
   | { type: "DELETE_CHAT"; id: string }
   | { type: "ARCHIVE_CHAT"; id: string }
   | { type: "UNARCHIVE_CHAT"; id: string }
@@ -1425,9 +1431,17 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const scope = workbenchScopeForFolder(action.chat.folder);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
       const existing = cur.tabs.find((tab) => tab.type === "chat" && tab.chatId === action.chat.id);
-      const tab = existing ?? createSideChatTab(action.chat.id, action.chat.title || "Side chat");
+      const replaced = existing || !action.replaceChatId
+        ? undefined
+        : cur.tabs.find((tab) => tab.type === "chat" && tab.chatId === action.replaceChatId);
+      const tab = existing ?? (replaced
+        ? { ...replaced, chatId: action.chat.id }
+        : createSideChatTab(action.chat.id, action.chat.title || "Side chat"));
       return {
         ...state,
+        workspaceActivityByFolder: action.recordWorkspaceActivity
+          ? nextWorkspaceActivityRecord(state.workspaceActivityByFolder, action.chat.folder)
+          : state.workspaceActivityByFolder,
         chats: state.chats.some((chat) => chat.id === action.chat.id)
           ? state.chats
           : [...state.chats, action.chat],
@@ -1435,7 +1449,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         newAgentFolder: null,
         workbenchByScope: setWorkbenchScope(state.workbenchByScope, scope, {
           ...cur,
-          tabs: existing ? cur.tabs : orderWorkbenchTabs([...cur.tabs, tab]),
+          tabs: existing
+            ? cur.tabs
+            : replaced
+              ? cur.tabs.map((row) => (row === replaced ? tab : row))
+              : orderWorkbenchTabs([...cur.tabs, tab]),
           activeId: tab.id,
         }),
       };

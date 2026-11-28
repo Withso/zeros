@@ -288,6 +288,7 @@ export const scenarioRegistry = [
     "runComposerAttachmentsSmoke",
   ),
   fresh("message-hover", "message-hover", "runMessageHoverSmoke", 1100, 900),
+  fresh("agents-tab", "agents-tab", "runAgentsTabSmoke", 1300, 900),
   shared("customize", "customize", "runCustomizeSmoke"),
   shared("tools", "tools", "runToolsSmoke"),
   shared("native-tools", "native-tools", "runNativeToolsSmoke"),

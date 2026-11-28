@@ -240,7 +240,7 @@ function useProvisionalBindingReconcile(
   const agents = useWorkspaceAgents(chat?.folder, enabled);
   const sessions = useAgentSessions();
   const bridgeStatus = useBridgeStatus(chat?.folder);
-  const chatId = chat?.kind === "chat" ? chat.id : null;
+  const chatId = chat?.kind === "chat" || chat?.kind === "side" ? chat.id : null;
   const boundAgentId = chat?.agentId ?? null;
   const hasSession = Boolean(chat?.providerBinding ?? chat?.sessionId);
 

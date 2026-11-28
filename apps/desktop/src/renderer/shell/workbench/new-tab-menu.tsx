@@ -19,6 +19,7 @@ import {
   NewTabEnvironmentMenu,
   NewTabEnvironmentSearchResults,
 } from "./new-tab-environment-menu";
+import { NewTabSideChatMenu } from "./new-tab-side-chat-menu";
 
 import {
   useActiveWorkbenchTabId,
@@ -78,6 +79,7 @@ export function WorkbenchNewTabMenu({
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState("new-file");
   const [environmentOpen, setEnvironmentOpen] = useState(false);
+  const [sideChatOpen, setSideChatOpen] = useState(false);
   const { key: fileKey, live: filesLive, canLoad } = useWorkspaceFileListScope(cwd, open);
   // Async state carries its semantic owner. A reused menu fiber can switch cwd
   // before its effect runs; it must never search the previous workspace's rows.
@@ -162,6 +164,14 @@ export function WorkbenchNewTabMenu({
     setQuery("");
     setSelection("new-file");
     setEnvironmentOpen(false);
+    setSideChatOpen(false);
+  };
+  const restoreSearchFocus = () => {
+    // Moving from one submenu to the other closes the first after the second
+    // has taken focus; handing focus back to the search would dismiss it.
+    if (document.activeElement instanceof HTMLElement && document.activeElement.closest('[role="menu"]')) return;
+    const input = menuRef.current?.querySelector<HTMLInputElement>("[cmdk-input]");
+    if (input?.isConnected) input.focus({ preventScroll: true });
   };
 
   const warm = () => {
@@ -236,6 +246,7 @@ export function WorkbenchNewTabMenu({
           setQuery("");
           setSelection("new-file");
           setEnvironmentOpen(false);
+          setSideChatOpen(false);
         }
       }}
     >
@@ -264,6 +275,7 @@ export function WorkbenchNewTabMenu({
           onValueChange={(value) => {
             setSelection(value);
             if (value !== "environment") setEnvironmentOpen(false);
+            if (value !== "side-chat") setSideChatOpen(false);
             if (SIMULATOR_ITEMS.some((item) => item.value === value)) {
               void warmSimulatorTab(scope).catch(() => {});
             }
@@ -277,15 +289,16 @@ export function WorkbenchNewTabMenu({
             onValueChange={(value) => {
               setQuery(value);
               setEnvironmentOpen(false);
+              setSideChatOpen(false);
             }}
             onKeyDown={(event) => {
-              if (
-                event.key === "ArrowRight" &&
-                selection === "environment" &&
-                !searching
-              ) {
+              if (event.key !== "ArrowRight" || searching) return;
+              if (selection === "environment") {
                 event.preventDefault();
                 setEnvironmentOpen(true);
+              } else if (selection === "side-chat") {
+                event.preventDefault();
+                setSideChatOpen(true);
               }
             }}
           />
@@ -324,20 +337,21 @@ export function WorkbenchNewTabMenu({
                       <span>{simulatorPlatformLabel(platform)}</span>
                     </CommandItem>
                   ))}
+                <NewTabSideChatMenu
+                  open={sideChatOpen}
+                  onOpenChange={setSideChatOpen}
+                  scope={scope}
+                  folder={terminalFolder}
+                  onDone={close}
+                  restoreSearchFocus={restoreSearchFocus}
+                />
                 <NewTabEnvironmentMenu
                   open={environmentOpen}
                   onOpenChange={setEnvironmentOpen}
                   terminalFolder={terminalFolder}
                   cwd={cwd ?? undefined}
                   onSelect={openEnvironment}
-                  restoreSearchFocus={() => {
-                    const input =
-                      menuRef.current?.querySelector<HTMLInputElement>(
-                        "[cmdk-input]",
-                      );
-                    if (input?.isConnected)
-                      input.focus({ preventScroll: true });
-                  }}
+                  restoreSearchFocus={restoreSearchFocus}
                 />
               </CommandGroup>
             )}

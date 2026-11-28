@@ -82,6 +82,7 @@ const originalOrder = [
   "mentions",
   "composer-attachments",
   "message-hover",
+  "agents-tab",
   "customize",
   "tools",
   "native-tools",

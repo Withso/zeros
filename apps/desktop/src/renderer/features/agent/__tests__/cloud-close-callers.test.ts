@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BLANK } from "../sessions-store";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { canSwitchPristineChat } from "../pristine-chat";
+import { publishReplacementChat } from "../side-chat";
 
 // Run the actual two close callers. Hold only their shared session boundary.
 const file = new URL("../agent-chat.tsx", import.meta.url);
@@ -21,10 +22,10 @@ const code = ts.transpileModule([...callbacks].map(([name, body]) => `globalThis
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function harness(local = false, title = "Untitled") {
+function harness(local = false, title = "Untitled", kind = "chat") {
   const chat = { id: "chat-a", folder: local ? "/personal/project" :
     "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
-  title, agentId: "codex", kind: "chat", updatedAt: 1 };
+  title, agentId: "codex", kind, sourceChatId: kind === "side" ? "source" : undefined, updatedAt: 1 };
   const state = { chats: [chat], activeChatId: chat.id, navigationVersion: 0, chatComposerDrafts: {} };
   const slot = { ...BLANK };
   let confirm!: (closed: boolean) => void;
@@ -47,7 +48,7 @@ function harness(local = false, title = "Untitled") {
     newChatBornDefaults: () => ({ permissionMode: "auto" }),
     resolveModelConfiguration: () => ({ effort: "high", fast: false }),
     slashCommandKind: () => "inline", newChatId: () => "chat-new",
-    isCloudWorkspace, canSwitchPristineChat, getLiveChatDraft: () => null,
+    isCloudWorkspace, canSwitchPristineChat, getLiveChatDraft: () => null, publishReplacementChat,
   });
   vm.runInContext(code, context);
   return { state, chat, slot, confirm, closeSession, dispatch, update, hydrateChat,
@@ -173,5 +174,13 @@ describe("cloud session close callers", () => {
     const clear = harness(true), model = harness(true); clear.clear(); model.switch();
     expect(clear.dispatch.mock.calls.map(([action]) => action.type)).toEqual(["ADD_CHAT", "ARCHIVE_CHAT"]);
     expect(model.update).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a cleared side chat a side chat, in its own Workbench tab", () => {
+    const clear = harness(true, "Side chat", "side"); clear.clear();
+    expect(clear.dispatch.mock.calls.map(([action]) => action.type)).toEqual(["OPEN_SIDE_CHAT", "ARCHIVE_CHAT"]);
+    expect(clear.dispatch.mock.calls[0][0]).toMatchObject({
+      replaceChatId: "chat-a", chat: { id: "chat-new", kind: "side", sourceChatId: "source" },
+    });
   });
 });

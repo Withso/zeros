@@ -19,7 +19,8 @@ export function createForkedChat(
   return {
     id,
     folder: source.folder,
-    ...(source.kind ? { kind: source.kind } : {}),
+    // A fork of a side chat is an ordinary chat in the column.
+    ...(source.kind && source.kind !== "side" ? { kind: source.kind } : {}),
     agentId: source.agentId,
     agentName: source.agentName,
     model: source.model,

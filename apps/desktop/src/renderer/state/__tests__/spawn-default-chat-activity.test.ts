@@ -5,7 +5,7 @@ import {
   spawnDefaultChatForWorkspace,
   spawnNewChatTab,
 } from "../spawn-default-chat";
-import type { Action } from "../workspace-store";
+import { useWorkspaceStore, type Action } from "../workspace-store";
 
 describe("chat-tab workspace activity", () => {
   it("starts cloud and Local tabs from the same global default", () => {
@@ -45,5 +45,20 @@ describe("chat-tab workspace activity", () => {
     expect(automaticActions).not.toContainEqual(
       expect.objectContaining({ recordWorkspaceActivity: true }),
     );
+  });
+
+  it("starts an ordinary chat when the folder's only open chat is a side chat the column cannot show", async () => {
+    const folder = `/side-only-${Date.now()}`;
+    const memory = new Map<string, string>();
+    const storage = { getItem: (k: string) => memory.get(k) ?? null, setItem: (k: string, v: string) => void memory.set(k, v), removeItem: (k: string) => void memory.delete(k) };
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("window", { setTimeout: () => 0, clearTimeout: () => {}, addEventListener: () => {}, localStorage: storage });
+    const side = { ...bornChatThread(null, folder), id: `side-${Date.now()}`, kind: "side" as const, title: "Side chat" };
+    useWorkspaceStore.setState((state) => ({ chats: [...state.chats, side] }));
+    vi.unstubAllGlobals();
+    const actions: Action[] = [];
+    expect(await spawnDefaultChatForWorkspace({ folder, sessions: {} as never, dispatch: (action) => actions.push(action) })).toBe(true);
+    expect(actions).toContainEqual(expect.objectContaining({ type: "ADD_CHAT", chat: expect.objectContaining({ folder }) }));
+    expect(actions.find((action) => action.type === "ADD_CHAT")).not.toHaveProperty("chat.kind", "side");
   });
 });

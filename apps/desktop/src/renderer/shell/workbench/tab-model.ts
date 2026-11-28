@@ -22,7 +22,7 @@ import {
   File as FileIcon,
   Bot,
   GitPullRequestArrow,
-  MessageSquare,
+  MessageCircle,
   Smartphone,
   Terminal,
   PenTool,
@@ -590,7 +590,7 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   },
   chat: {
     label: "Side chat",
-    icon: MessageSquare,
+    icon: MessageCircle,
   },
 };
 

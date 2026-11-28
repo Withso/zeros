@@ -1,3 +1,4 @@
+import { isSideChat } from "./side-chat-seeds";
 import type { ChatThread } from "../../state/store";
 import { useWorkspaceStore } from "../../state/store";
 import { threadToRow } from "../../state/chat-row-wire";
@@ -12,9 +13,10 @@ import {
 import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 
 /** Add child session is Local only: Cloud workspaces have no Local
- *  orchestration links to nest the child with. */
+ *  orchestration links to nest the child with. A side chat is not a session,
+ *  so it never parents one. */
 export function canAddChildSession(parent: ChatThread | null | undefined): parent is ChatThread {
-  return !!parent && parent.kind !== "terminal" && !parent.archived && !!parent.folder && !isCloudWorkspace(parent.folder);
+  return !!parent && parent.kind !== "terminal" && !isSideChat(parent) && !parent.archived && !!parent.folder && !isCloudWorkspace(parent.folder);
 }
 
 export function createChildChat(parent: ChatThread, id?: string, now?: number): ChatThread {
