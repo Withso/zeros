@@ -7,16 +7,20 @@ export interface DesignTextInsertionMarkup {
   y: number;
   width?: number;
   height?: number;
-  /** Flow remains available to component-slot insertion; ordinary canvas text
-   * is positioned where the text editor painted it. */
+  /** Auto-layout and component-slot destinations keep text in flow; ordinary
+   * canvas parents position it where the text editor painted it. */
   placement?: "absolute" | "flow";
   typography?: Record<string, string>;
 }
 
 export function designTextInsertionPlacement(
-  parent: { oid: string } | null | undefined,
+  parent: { oid: string; styles?: Record<string, string> } | null | undefined,
 ): "absolute" | "flow" {
-  return parent && designComponentSlotOf(parent.oid) !== null
+  return parent &&
+    (designComponentSlotOf(parent.oid) !== null ||
+      ["flex", "inline-flex", "grid", "inline-grid"].includes(
+        parent.styles?.display ?? "",
+      ))
     ? "flow"
     : "absolute";
 }
@@ -81,17 +85,21 @@ function escapeDesignText(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Build the only markup emitted by the canvas Text tool. Values are bounded
- * before the engine's semantic HTML operation performs its own validation. */
-export function createDesignTextMarkup(
-  input: DesignTextInsertionMarkup,
-): string {
+function validateDesignTextInput(input: DesignTextInsertionMarkup): void {
   if (!DESIGN_TEXT_NODE_ID.test(input.nodeId)) {
     throw new Error("Design text node id is invalid.");
   }
   if (input.text.length > 10_000) {
     throw new Error("Design text is too long.");
   }
+}
+
+/** The raw inline style for the canvas Text tool. HTML emission escapes it as
+ * an attribute; runtime previews need the unescaped form for setAttribute. */
+export function createDesignTextStyle(
+  input: DesignTextInsertionMarkup,
+): string {
+  validateDesignTextInput(input);
   const x = finiteCoordinate(input.x, "x");
   const y = finiteCoordinate(input.y, "y");
   const placement =
@@ -106,8 +114,19 @@ export function createDesignTextMarkup(
           finiteCoordinate(input.height ?? 1, "height"),
         )}px;`;
   const typography = Object.entries(designTextTypography(input.typography ?? {}))
-    .map(([key, value]) => `${typeProperties[key as keyof typeof typeProperties]}:${value.replace(/&/g, "&amp;").replace(/"/g, "&quot;")};`).join("");
-  return `<div data-oid="${input.nodeId}" style="${placement}${size}margin:0;white-space:pre-wrap;overflow-wrap:anywhere;${typography}">${escapeDesignText(input.text)}</div>`;
+    .map(([key, value]) => `${typeProperties[key as keyof typeof typeProperties]}:${value};`).join("");
+  return `${placement}${size}margin:0;white-space:pre-wrap;overflow-wrap:anywhere;${typography}`;
+}
+
+/** Build the only markup emitted by the canvas Text tool. Values are bounded
+ * before the engine's semantic HTML operation performs its own validation. */
+export function createDesignTextMarkup(
+  input: DesignTextInsertionMarkup,
+): string {
+  const style = createDesignTextStyle(input)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
+  return `<div data-oid="${input.nodeId}" style="${style}">${escapeDesignText(input.text)}</div>`;
 }
 
 export function createDesignTextNodeId(): string {

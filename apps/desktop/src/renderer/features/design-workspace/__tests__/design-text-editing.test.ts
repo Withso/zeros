@@ -73,17 +73,24 @@ describe("design text insertion", () => {
   });
 
   it.each(["flex", "inline-flex", "grid", "inline-grid"])(
-    "places newly typed text at its previewed point inside %s",
+    "keeps newly typed text in %s flow without rewriting the parent",
     (display) => {
       const parent = { oid: "parent", styles: { display, position: "static" } };
       const placement = designTextInsertionPlacement(parent);
-      expect(placement).toBe("absolute");
-      expect(designTextParentNeedsPosition(parent, placement)).toBe(true);
+      expect(placement).toBe("flow");
+      expect(designTextParentNeedsPosition(parent, placement)).toBe(false);
     },
   );
 
-  it("does not rewrite an already positioned flex parent", () => {
-    const parent = { oid: "parent", styles: { display: "flex", position: "relative" } };
+  it("places text absolutely in a static block parent and positions that parent", () => {
+    const parent = { oid: "parent", styles: { display: "block", position: "static" } };
+    const placement = designTextInsertionPlacement(parent);
+    expect(placement).toBe("absolute");
+    expect(designTextParentNeedsPosition(parent, placement)).toBe(true);
+  });
+
+  it("does not rewrite an already positioned block parent", () => {
+    const parent = { oid: "parent", styles: { display: "block", position: "relative" } };
     const placement = designTextInsertionPlacement(parent);
     expect(placement).toBe("absolute");
     expect(designTextParentNeedsPosition(parent, placement)).toBe(false);

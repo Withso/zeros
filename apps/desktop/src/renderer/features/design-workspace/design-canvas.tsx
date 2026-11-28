@@ -160,6 +160,7 @@ import {
   designDrawParentAt,
   designDrawnFrameWrapOperations,
   designFrameInsertion,
+  designPointInChildCoordinateSpace,
   designTreeChildIds,
   designWrapInFlow,
 } from "./design-frame-insertion";
@@ -229,6 +230,7 @@ import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import {
   createDesignTextMarkup,
+  createDesignTextStyle,
   designNewTextTypography,
   designTextTypography,
   designTextTypographyProperties,
@@ -7294,6 +7296,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       owner: DesignCanvasFrameWire,
       start: { x: number; y: number },
       end?: { x: number; y: number },
+      prepared?: {
+        runtime: DesignFrameRuntimeConnection;
+        parent: DesignRuntimeNodeDetails;
+        nodeId: string;
+      },
     ) => {
       if (!workspaceId || !folder || creatingFrameRef.current) return;
       creatingFrameRef.current = true;
@@ -7301,19 +7308,22 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const selection = designWorkspaceView(workspaceId);
       let preview: { runtime: DesignFrameRuntimeConnection; nodeId: string } | null = null;
       try {
-        const runtime = designFrameRuntime(workspaceId, owner.file);
+        const runtime = prepared?.runtime ?? designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
           throw new Error("The frame is still preparing its editable surface.");
-        let parent = await designDrawParentAt(runtime, start);
+        let parent = prepared?.parent ?? null;
         if (!parent) {
-          const snapshot = await runtime.getSnapshot();
-          parent = snapshot.frame.oid
-            ? await runtime.getNodeDetails(snapshot.frame.oid)
-            : null;
+          parent = await designDrawParentAt(runtime, start);
+          if (!parent) {
+            const snapshot = await runtime.getSnapshot();
+            parent = snapshot.frame.oid
+              ? await runtime.getNodeDetails(snapshot.frame.oid)
+              : null;
+          }
         }
         if (!parent || !canInsertDesignFrame(parent))
           throw new Error("Select a drawable frame for the new child.");
-        const nodeId = `frame-${crypto.randomUUID()}`;
+        const nodeId = prepared?.nodeId ?? `frame-${crypto.randomUUID()}`;
         const { operations: insertion, insert, parentStyles, bounds } = designFrameInsertion(
           parent,
           nodeId,
@@ -7478,6 +7488,81 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       // A top-level frame stops at the storable size; a child frame is a
       // layer and has no such limit.
       const frameSizeLimit = owner ? undefined : DESIGN_FRAME_MAX_SIZE;
+      const liveInsert = owner
+        ? {
+            runtime: designFrameRuntime(workspaceId, owner.file),
+            nodeId: `frame-${crypto.randomUUID()}`,
+            parent: null as DesignRuntimeNodeDetails | null,
+            pending: null as { x: number; y: number } | null,
+            task: null as Promise<void> | null,
+            cancelled: false,
+            disabled: false,
+            painted: false,
+          }
+        : null;
+      const localStart = owner ? { x: start.x - owner.x, y: start.y - owner.y } : start;
+      const resolveLiveParent = async () => {
+        if (!owner || !liveInsert?.runtime) throw new Error("The frame is still preparing its editable surface.");
+        let parent = await designDrawParentAt(liveInsert.runtime, localStart);
+        if (!parent) {
+          const snapshot = await liveInsert.runtime.getSnapshot();
+          parent = snapshot.frame.oid
+            ? await liveInsert.runtime.getNodeDetails(snapshot.frame.oid)
+            : null;
+        }
+        if (!parent || !canInsertDesignFrame(parent))
+          throw new Error("Select a drawable frame for the new child.");
+        return parent;
+      };
+      const queueLiveInsert = () => {
+        if (!owner || !liveInsert || liveInsert.cancelled || liveInsert.disabled || !liveInsert.pending) return;
+        if (liveInsert.task) return;
+        const runtime = liveInsert.runtime;
+        if (!runtime?.supports("previewInsert") || runtime.sourceVersion !== owner.sourceVersion) {
+          liveInsert.disabled = true;
+          return;
+        }
+        liveInsert.task = (async () => {
+          while (liveInsert.pending && !liveInsert.cancelled) {
+            const end = liveInsert.pending;
+            liveInsert.pending = null;
+            try {
+              liveInsert.parent ??= await resolveLiveParent();
+              if (liveInsert.parent.sourceVersion !== owner.sourceVersion) {
+                liveInsert.disabled = true;
+                return;
+              }
+              const { insert, parentStyles } = designFrameInsertion(
+                liveInsert.parent,
+                liveInsert.nodeId,
+                localStart,
+                end,
+              );
+              await runtime.previewInsert({
+                inserts: [insert],
+                ...(parentStyles ? { updates: [{ nodeId: liveInsert.parent.oid, styles: parentStyles }] } : {}),
+              });
+              if (liveInsert.cancelled) {
+                void runtime.clearPreviewInserts([liveInsert.nodeId]).catch(() => {});
+                return;
+              }
+              liveInsert.painted = true;
+              hideCreationDraft();
+            } catch {
+              liveInsert.disabled = true;
+              return;
+            }
+          }
+        })().finally(() => {
+          liveInsert.task = null;
+          if (liveInsert.pending && !liveInsert.cancelled) queueLiveInsert();
+        });
+      };
+      const settleLiveInsert = async () => {
+        while (liveInsert?.task) {
+          await liveInsert.task.catch(() => {});
+        }
+      };
       const pointerId = event.pointerId;
       let latest = start;
       let moved = false;
@@ -7501,11 +7586,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           return;
         }
         moved = true;
-        paintCreationDraft(
-          designCanvasRectFromPoints(start, latest, frameSizeLimit),
-          "frame",
-          gestureViewport.zoom,
-        );
+        if (!liveInsert?.painted) {
+          paintCreationDraft(
+            designCanvasRectFromPoints(start, latest, frameSizeLimit),
+            "frame",
+            gestureViewport.zoom,
+          );
+        }
+        if (owner && liveInsert) {
+          liveInsert.pending = { x: latest.x - owner.x, y: latest.y - owner.y };
+          queueLiveInsert();
+        }
       };
       const cleanup = (hide = true) => {
         window.removeEventListener("pointermove", move);
@@ -7537,26 +7628,35 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             ),
           ),
         };
-        paintCreationDraft(
-          {
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.w,
-            height: geometry.h,
-          },
-          "frame",
-          gestureViewport.zoom,
-        );
+        if (!liveInsert?.painted) {
+          paintCreationDraft(
+            {
+              x: geometry.x,
+              y: geometry.y,
+              width: geometry.w,
+              height: geometry.h,
+            },
+            "frame",
+            gestureViewport.zoom,
+          );
+        }
         cleanup(false);
         activateTool("select");
         if (owner) {
-          void createChildFrame(
-            owner,
-            { x: start.x - owner.x, y: start.y - owner.y },
-            moved
-              ? { x: latest.x - owner.x, y: latest.y - owner.y }
-              : undefined,
-          ).finally(hideCreationDraft);
+          const prepared = liveInsert?.parent && liveInsert.runtime
+            ? { runtime: liveInsert.runtime, parent: liveInsert.parent, nodeId: liveInsert.nodeId }
+            : undefined;
+          void (async () => {
+            await settleLiveInsert();
+            await createChildFrame(
+              owner,
+              localStart,
+              moved
+                ? { x: latest.x - owner.x, y: latest.y - owner.y }
+                : undefined,
+              prepared,
+            );
+          })().finally(hideCreationDraft);
         } else {
           // The hand-off belongs to this canvas lifetime: a reply that lands
           // after the surface hid or changed owner only clears the draft.
@@ -7568,7 +7668,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           );
         }
       };
-      const cancel = () => cleanup();
+      const cancel = () => {
+        if (liveInsert) {
+          liveInsert.cancelled = true;
+          if (liveInsert.painted) {
+            void liveInsert.runtime?.clearPreviewInserts([liveInsert.nodeId]).catch(() => {});
+          }
+        }
+        cleanup();
+      };
 
       gestureCancelRef.current?.();
       gestureCancelRef.current = cancel;
@@ -7803,7 +7911,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         document.body.style.userSelect = "";
         gestureCancelRef.current = null;
       };
-      const openNewText = (
+      const openNewText = async (
         point: { x: number; y: number },
         size?: { width: number; height: number },
         hitDetails?: DesignRuntimeNodeDetails | null,
@@ -7854,18 +7962,54 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const nodeId = createDesignTextNodeId();
         const placement = designTextInsertionPlacement(parentDetails);
         const parentNeedsPosition = designTextParentNeedsPosition(parentDetails, placement);
-        // Authored data-oid roots are positioned containers. Store coordinates
-        // in that exact containing block while the gesture remains frame-local.
-        const parentPoint = {
-          x: point.x - (parentDetails?.rect.x ?? 0),
-          y: point.y - (parentDetails?.rect.y ?? 0),
-        };
         inlineTextDraftRef.current = "";
         const previousSelection = designWorkspaceView(workspaceId);
         const newTypography = designNewTextTypography(
           parentDetails?.styles,
           recentType.current?.owner === canvasDocumentOwnerRef.current ? recentType.current.styles : undefined,
         );
+        let editorPoint = point;
+        if (placement === "flow") {
+          const runtime = designFrameRuntime(workspaceId, frame.file);
+          if (
+            runtime?.supports("previewInsert") &&
+            runtime.sourceVersion === frame.sourceVersion
+          ) {
+            try {
+              const style = createDesignTextStyle({
+                nodeId,
+                text: "",
+                x: 0,
+                y: 0,
+                placement,
+                typography: newTypography,
+                ...(size ? size : {}),
+              });
+              const measured = await runtime.previewInsert({
+                inserts: [{ nodeId, parentId: parentNodeId, beforeId: null, tag: "div", style }],
+              });
+              void runtime.clearPreviewInserts([nodeId]).catch(() => {});
+              const measuredRect = measured.details[0]?.rect;
+              if (measuredRect) editorPoint = { x: measuredRect.x, y: measuredRect.y };
+            } catch {
+              // The editor still opens at the pointer when speculative layout is unavailable.
+            }
+          }
+        }
+        // Authored data-oid roots are positioned containers. Store absolute
+        // coordinates in the parent's border/scroll/transform child space.
+        let parentPoint = {
+          x: point.x - (parentDetails?.rect.x ?? 0),
+          y: point.y - (parentDetails?.rect.y ?? 0),
+        };
+        if (placement === "absolute" && parentDetails) {
+          try {
+            parentPoint = designPointInChildCoordinateSpace(parentDetails, point);
+          } catch {
+            toast.error("The frame's editable coordinates are unavailable");
+            return;
+          }
+        }
         useDesignWorkspaceUiStore
           .getState()
           .setSelection(workspaceId, frame.file, null, undefined, { owner: canvasPageOwner });
@@ -7882,8 +8026,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           sourceVersion: frame.sourceVersion,
           initialText: "",
           status: "editing",
-          canvasX: point.x,
-          canvasY: point.y,
+          canvasX: editorPoint.x,
+          canvasY: editorPoint.y,
           x: parentPoint.x,
           y: parentPoint.y,
           ...(size ? size : {}),
@@ -7906,13 +8050,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         cleanup();
         if (moved) {
           const rect = designCanvasRectFromPoints(start, latest);
-          openNewText(
+          void openNewText(
             { x: rect.x, y: rect.y },
             {
               width: Math.max(1, rect.width),
               height: Math.max(1, rect.height),
             },
-          );
+          ).catch((insertError) => {
+            toast.error("Couldn't start text editing", { description: errorMessage(insertError) });
+          });
           return;
         }
         void inspectDesignNodeAtLocation({
@@ -7935,7 +8081,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               finishInlineTextTool(frame, details);
               return;
             }
-            openNewText(start, undefined, details);
+            void openNewText(start, undefined, details).catch((insertError) => {
+              toast.error("Couldn't start text editing", { description: errorMessage(insertError) });
+            });
           })
           .catch((selectionError) => {
             toast.error("Couldn't start text editing", {
