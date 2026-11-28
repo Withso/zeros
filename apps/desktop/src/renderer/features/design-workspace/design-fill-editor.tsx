@@ -248,13 +248,13 @@ function DesignFillPopover({
   const [type, setType] = useState<DesignFillType>(() =>
     classifyDesignFill(image),
   );
+  const initialGradient = parseEditableDesignGradient(image, resolvedImage);
   const [gradient, setGradient] = useState<DesignGradientValue>(
-    () =>
-      parseEditableDesignGradient(image, resolvedImage) ?? {
-        ...DEFAULT_DESIGN_GRADIENT,
-      },
+    () => initialGradient ?? { ...DEFAULT_DESIGN_GRADIENT },
   );
-  const [unsupportedGradient, setUnsupportedGradient] = useState(false);
+  const [unsupportedGradient, setUnsupportedGradient] = useState(
+    () => classifyDesignFill(image) === "gradient" && initialGradient === null,
+  );
   const [stop, setStop] = useState<"start" | "end">("start");
   const [imageUrl, setImageUrl] = useState(() => readDesignImageUrl(image));
   const [imagePosition, setImagePosition] = useState(position);

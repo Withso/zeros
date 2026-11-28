@@ -287,6 +287,38 @@ describe("destructive fill edits", () => {
     );
   });
 
+  it("does not edit geometry a tokenized conic gradient hides", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "conic-gradient(from 90deg at 20% 20%, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value:
+              "conic-gradient(from var(--conic-angle,\n 90deg), red, blue)",
+          },
+        },
+      },
+    );
+    await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    expect(
+      document.querySelector<HTMLInputElement>(
+        'input[aria-label="Gradient angle value"]',
+      )?.disabled,
+    ).toBe(true);
+  });
+
   it("does not offer Add fill when another selected layer has a fill to overwrite", async () => {
     const empty = detailsFor({ backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none" }); // check:ui ignore-line -- CSSOM fixture
     const filled = detailsFor(

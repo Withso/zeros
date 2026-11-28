@@ -95,13 +95,21 @@ function lastTopLevelWhitespace(value: string): number {
   return splitAt;
 }
 
+function stripCssComments(value: string): string {
+  return value.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
 function parseStop(
   value: string,
   fallbackPosition: string,
 ): { color: string; position: string } | null {
   const splitAt = lastTopLevelWhitespace(value);
   const possiblePosition = splitAt >= 0 ? value.slice(splitAt).trim() : "";
-  const hasPosition = STOP_POSITION.test(possiblePosition);
+  // A trailing var() can be a position only when a real color precedes it;
+  // comments alone must not turn the gradient's color token into a position.
+  const hasPosition =
+    STOP_POSITION.test(possiblePosition) &&
+    stripCssComments(splitAt >= 0 ? value.slice(0, splitAt) : "").trim() !== "";
   const color = (hasPosition ? value.slice(0, splitAt) : value).trim();
   if (hasPosition) {
     const previousSplit = lastTopLevelWhitespace(color);
@@ -218,11 +226,8 @@ export function parseEditableDesignGradient(
 ): DesignGradientValue | null {
   const parsed = parseDesignGradient(value);
   if (!parsed) return null;
-  const input = gradientInput(value);
-  const ambiguous = Boolean(
-    input?.parts?.length === 3 && angleToken(input.parts[0]!),
-  );
-  return ambiguous && !parseDesignGradient(resolvedValue) ? null : parsed;
+  const tokenAngle = typeof parsed.angle === "string" && angleToken(parsed.angle);
+  return tokenAngle && !parseDesignGradient(resolvedValue) ? null : parsed;
 }
 
 function number(value: number): string {

@@ -125,6 +125,19 @@ describe("design fill values", () => {
     expect(conic?.angle).toBe("var(--gradient-angle,\n 90deg)");
   });
 
+  it("keeps a commented color token as the stop color", () => {
+    const parsed = parseDesignGradient(
+      "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+    );
+    expect(parsed).toMatchObject({
+      start: "/* accent */ var(--accent)",
+      startPosition: "0%",
+    });
+    expect(formatDesignGradient(parsed!)).toBe(
+      "linear-gradient(90deg, /* accent */ var(--accent) 0%, blue 100%)",
+    );
+  });
+
   it("fails closed for gradients the two-stop editor cannot preserve", () => {
     expect(
       parseDesignGradient("linear-gradient(red, yellow 50%, blue)"),
