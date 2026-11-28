@@ -281,35 +281,50 @@ export function DesignStyleEditor({
   const independentCorners = cornersOpen || cornersDiffer;
   const blendMode = styleValue(details, "mix-blend-mode", "normal");
 
-  const fillProperty = textLayer ? "color" : "background-color";
+  const fillImage = styleValue(details, "background-image", "none");
+  const authoredFillImage = details.authoredStyles?.["background-image"]?.value;
+  const editableFillImage =
+    authoredFillImage &&
+    /(?:linear|radial|conic)-gradient\(/i.test(authoredFillImage)
+      ? authoredFillImage
+      : fillImage;
+  const backgroundFillColor = styleValue(
+    details,
+    "background-color",
+    "transparent",
+  );
+  // Text without a painted background keeps Fill as its text colour. Once
+  // the layer paints a background, that background is the fill being edited.
+  const fillTargetsText =
+    textLayer && designFillIsEmpty(backgroundFillColor, editableFillImage);
+  const fillProperty = fillTargetsText ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
   const confirmedFillColor = styleValue(
     details,
     fillProperty,
-    textLayer ? "currentColor" : "transparent",
+    fillTargetsText ? "currentColor" : "transparent",
   );
-  const fillImage = styleValue(details, "background-image", "none");
   // An added fill is a row at once, as in Figma, while its save lands.
   const [addedFill, setAddedFill] = useState<string | null>(null);
-  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, fillImage);
+  const fillAdding = !fillTargetsText && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, editableFillImage);
   useEffect(() => {
-    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, fillImage))) setAddedFill(null);
-  }, [addedFill, confirmedFillColor, details.oid, fillImage]);
+    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
+  }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
   const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
   const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
     selection,
     selectionCount,
-    textLayer ? ["color"] : ["background-color", "background-image"],
+    fillTargetsText ? ["color"] : ["background-color", "background-image"],
   );
   // A fill the user authored stays a row even at 0% (so a popover editing it
   // stays open); only an unauthored, fully transparent background is empty.
   // Differing fills are one Mixed row, even when the first layer has none.
   const fillEmpty =
     !fillAdding &&
-    !textLayer &&
+    !fillTargetsText &&
     !fillMixed &&
-    designFillIsEmpty(fillColor, fillImage) &&
+    designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
 
@@ -559,7 +574,7 @@ export function DesignStyleEditor({
         empty={fillEmpty}
         data-design-fill-section=""
         actions={
-          fillEmpty ? (
+          !fillTargetsText ? (
             <>
               <MotionPropertyAction
                 label="fill"
@@ -574,17 +589,17 @@ export function DesignStyleEditor({
                 label="Add fill"
                 disabled={disabled}
                 onClick={() => {
-                  if (!textLayer) {
+                  if (designFillIsEmpty(confirmedFillColor, editableFillImage)) {
                     requestDesignPaintPicker("background-color");
                     setAddedFill(details.oid);
                   }
-                  void commit(
-                    {
-                      "background-color": NEW_FILL_COLOR,
-                      "background-image": "none",
-                    },
-                    "fill",
-                  ).catch(() => setAddedFill(null));
+                  const styles: Record<string, string> = {
+                    "background-color": NEW_FILL_COLOR,
+                  };
+                  if (!editableFillImage.trim() || editableFillImage.trim() === "none") {
+                    styles["background-image"] = "none";
+                  }
+                  void commit(styles, "fill").catch(() => setAddedFill(null));
                 }}
               >
                 <Plus />
@@ -601,7 +616,7 @@ export function DesignStyleEditor({
               : "grid-cols-[minmax(0,1fr)_auto]",
           )}
         >
-          {textLayer ? (
+          {fillTargetsText ? (
             <DesignColorField
               value={fillColor}
               label="Fill"
@@ -617,6 +632,7 @@ export function DesignStyleEditor({
             <DesignFillEditor
               color={fillColor}
               image={fillImage}
+              editableImage={editableFillImage}
               {...fillToken}
               position={styleValue(details, "background-position", "0% 0%")}
               size={styleValue(details, "background-size", "auto")}
@@ -638,7 +654,7 @@ export function DesignStyleEditor({
               disabled={disabled}
               onRequest={onOpenMotionTimeline}
             />
-            {!textLayer ? (
+            {!fillTargetsText ? (
               <InspectorIconButton
                 label="Remove fill"
                 disabled={disabled}
@@ -657,7 +673,7 @@ export function DesignStyleEditor({
             ) : null}
           </div>
         </div>
-        {!textLayer &&
+        {!fillTargetsText &&
         styleValue(details, "background-blend-mode", "normal") !== "normal" ? (
           <InspectorSelect
             label="Fill blend"

@@ -1,0 +1,216 @@
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import { TooltipProvider } from "../../../shared/ui/primitives";
+import { DesignStyleEditor } from "../design-style-editor";
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+let root: Root;
+let host: HTMLDivElement;
+
+beforeEach(() => {
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+});
+
+function detailsFor(
+  styles: Record<string, string>,
+  overrides: Partial<DesignRuntimeNodeDetails> = {},
+): DesignRuntimeNodeDetails {
+  return {
+    sourceVersion: "a".repeat(24),
+    oid: "layer",
+    tag: "div",
+    name: "Layer",
+    text: null,
+    selector: '[data-oid="layer"]',
+    visible: true,
+    breadcrumb: [],
+    rect: { x: 0, y: 0, width: 160, height: 80 },
+    styles,
+    ...overrides,
+  } as DesignRuntimeNodeDetails;
+}
+
+type CommitStyles = (styles: Record<string, string | null>) => Promise<void>;
+
+async function renderEditor(
+  details: DesignRuntimeNodeDetails,
+  onCommitStyles = vi.fn<CommitStyles>(async () => {}),
+) {
+  await act(async () =>
+    root.render(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(DesignStyleEditor, {
+          details,
+          renderField: (label: string) =>
+            createElement("input", { "aria-label": label }),
+          onLayoutAction: async () => {},
+          onPreviewStyles: async () => {},
+          onCancelStylePreview: async () => {},
+          onCommitStyles,
+          onOpenMotionTimeline: () => {},
+        }),
+      ),
+    ),
+  );
+  return onCommitStyles;
+}
+
+function setInputValue(input: HTMLInputElement, value: string) {
+  input.focus();
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  setter.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("destructive fill edits", () => {
+  it("adds a fill on a layer with a gradient and image stack without discarding it", async () => {
+    const existing =
+      "linear-gradient(180deg, rgb(0 0 0 / 0) 30%, rgb(0 0 0 / 0.7)), url(../assets/images/orbit.jpg)"; // check:ui ignore-line -- authored CSS fixture
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: "none",
+      },
+      {
+        authoredStyles: {
+          "background-image": { origin: "inline", value: existing },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    const add = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add fill"]',
+    );
+    expect(add).not.toBeNull();
+    await act(async () => add!.click());
+
+    expect(onCommit).toHaveBeenCalled();
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-color"]).toBe("#FFFFFF"); // check:ui ignore-line -- authored CSS fixture
+    expect(written["background-image"] ?? existing).toBe(existing);
+  });
+
+  it("preserves var() gradient stops when only the angle changes", async () => {
+    const authored = "linear-gradient(135deg, var(--accent), var(--success))";
+    const computed =
+      "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)"; // check:ui ignore-line -- CSSOM fixture
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: computed,
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": { origin: "inline", value: authored },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    const angle = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Gradient angle value"]',
+    );
+    expect(angle).not.toBeNull();
+    await act(async () => setInputValue(angle!, "90"));
+    await act(async () => angle!.blur());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
+    );
+  });
+
+  it("writes fill opacity to the background of a text-containing layer, not its text color", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "#FF0000", // check:ui ignore-line -- authored CSS fixture
+        backgroundImage: "none",
+        color: "#FFFFFF", // check:ui ignore-line -- authored CSS fixture
+      },
+      {
+        text: "Save changes",
+        textEditable: true,
+        authoredStyleProperties: ["background-color", "color"],
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    const opacity = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Fill opacity"]',
+    );
+    expect(opacity).not.toBeNull();
+    await act(async () => setInputValue(opacity!, "40"));
+    await act(async () => opacity!.blur());
+
+    expect(onCommit).toHaveBeenCalled();
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written).toHaveProperty("background-color");
+    expect(written).not.toHaveProperty("color");
+  });
+  it("keeps fill edits on text colour when the text layer paints no background", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: "none",
+        color: "#FFFFFF", // check:ui ignore-line -- authored CSS fixture
+      },
+      {
+        text: "Save changes",
+        textEditable: true,
+        authoredStyleProperties: ["color"],
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    const opacity = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Fill opacity"]',
+    );
+    expect(opacity).not.toBeNull();
+    await act(async () => setInputValue(opacity!, "40"));
+    await act(async () => opacity!.blur());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written).toHaveProperty("color");
+    expect(written).not.toHaveProperty("background-color");
+  });
+});
