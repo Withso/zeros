@@ -39,7 +39,10 @@ import { useDesignHistoryHandBack } from "./use-design-history-step";
 
 interface DesignFillEditorProps {
   color: string;
+  /** Resolved paint for the swatch. */
   image: string;
+  /** Authored paint for editing when provenance preserves tokens. */
+  editableImage?: string;
   position: string;
   size: string;
   repeat: string;
@@ -122,6 +125,7 @@ export function designFillIsEmpty(color: string, image: string): boolean {
 export function DesignFillEditor({
   color,
   image,
+  editableImage = image,
   position,
   size,
   repeat,
@@ -138,7 +142,8 @@ export function DesignFillEditor({
   // The declaration that paints the fill: the card and Reset speak to it.
   const painted = fillType === "solid" ? "background-color" : "background-image";
   const origin = useDesignFieldOrigin(painted, FILL_PROPERTIES);
-  const gradient = parseDesignGradient(image);
+  const gradient = parseDesignGradient(editableImage);
+  const resolvedGradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
       <DesignColorSwatch value={color} mixed={mixed} className="size-full" />
@@ -153,11 +158,12 @@ export function DesignFillEditor({
   const popover = (
     <DesignFillPopover
       color={color}
-      image={image}
+      image={editableImage}
       position={position}
       size={size}
       repeat={repeat}
       disabled={disabled}
+      resolvedGradient={resolvedGradient}
       tokenName={tokenName}
       onPreview={onPreview}
       onCancelPreview={onCancelPreview}
@@ -216,6 +222,7 @@ export function DesignFillEditor({
 }
 
 interface DesignFillPopoverProps extends DesignFillEditorProps {
+  resolvedGradient: DesignGradientValue | null;
   trigger: React.ReactNode;
 }
 
@@ -226,6 +233,7 @@ function DesignFillPopover({
   size,
   repeat,
   disabled,
+  resolvedGradient,
   tokenName,
   trigger,
   onPreview,
@@ -510,9 +518,13 @@ function DesignFillPopover({
               {unsupportedGradient ? null : (
                 <DesignColorPanel
                   key={stop}
-                  value={gradient[stop]}
+                  value={
+                    parseDesignColor(gradient[stop])
+                      ? gradient[stop]
+                      : (resolvedGradient?.[stop] ?? gradient[stop])
+                  }
                   label={stop === "start" ? "Start stop" : "End stop"}
-                  disabled={disabled}
+                  disabled={disabled || gradient[stop].toLocaleLowerCase().includes("var(")}
                   panelRef={panelRef}
                   onPreview={(next) =>
                     void updateGradient({ [stop]: next }, false)
