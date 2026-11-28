@@ -155,6 +155,14 @@ export function DispatcherPage(props: DispatcherPageProps) {
   return <ActiveDispatcherPage {...props} />;
 }
 
+/** Where "Manage repositories" leads: the Cloud Computer before connection levels; the
+ * organization's Connections page for every member of a multi-person organization;
+ * otherwise Personal → Integrations, which holds both groups. */
+export function githubManageSection(leveled: boolean, connections: { solo: boolean } | null | undefined, personal: boolean) {
+  if (!leveled) return "cloud-computer" as const;
+  return connections && !connections.solo && !personal ? "org-github" as const : "integrations" as const;
+}
+
 function ActiveDispatcherPage({
   active,
   initialProjectId,
@@ -644,8 +652,7 @@ function ActiveDispatcherPage({
   const leveled = (cloud.computerRepositories ?? []).some(repository => repository.level);
   const githubLevels = useGithubLevels(me?.user.id ?? "", cloudOrganizationFor(activeOrganization)?.id ?? "",
     active && unified && leveled && !!me);
-  const manageSection = !leveled ? "cloud-computer" as const
-    : githubLevels.connections && !githubLevels.connections.solo && !activeOrganization?.isPersonal ? "org-github" as const : "integrations" as const;
+  const manageSection = githubManageSection(leveled, githubLevels.connections, !!activeOrganization?.isPersonal);
   const openManageRepositories = () => {
     requestUserSettingsSection(manageSection);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });

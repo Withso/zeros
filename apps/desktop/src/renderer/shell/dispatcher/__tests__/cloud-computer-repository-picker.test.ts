@@ -88,3 +88,15 @@ describe("Cloud Computer project picker", () => {
     });
   });
 });
+
+describe("the Manage repositories destination", () => {
+  it("is the organization's Connections page for members and owners, else Integrations or the Cloud Computer", async () => {
+    const { githubManageSection } = await import("../dispatcher-modal");
+    expect(githubManageSection(false, { solo: false }, false)).toBe("cloud-computer");
+    expect(githubManageSection(true, { solo: false }, false)).toBe("org-github");
+    expect(githubManageSection(true, { solo: true }, false)).toBe("integrations");
+    expect(githubManageSection(true, { solo: false }, true)).toBe("integrations");
+    // Before the levels read answers, Integrations is the safe destination.
+    expect(githubManageSection(true, null, false)).toBe("integrations");
+  });
+});

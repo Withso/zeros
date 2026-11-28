@@ -637,6 +637,9 @@ export function GitHubSection({
     return !status.configured && status.health === "not-connected";
   }) && (!owner || (cloud && !cloud.methods.pat.configured && !cloud.methods["github-app"].configured));
   const List = workspaceIdentity ? SettingsList : "div";
+  // In the card, each detail is its own divided row; the legacy cards draw their own rule.
+  const detailCls = workspaceIdentity ? "flex min-w-0 flex-col gap-2.5"
+    : "border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3";
 
   return (
     <>
@@ -678,10 +681,10 @@ export function GitHubSection({
             const cloudMethod = method !== "gh-cli" && owner ? shared.read.data?.methods[method] : undefined;
             const settingUp = visibleSetup === method;
             const refreshing = refreshingMethod === method;
-            const showTopRefresh = shouldShowGithubTopRefresh(
-              summary,
-              selected,
-            );
+            // The workspace layout selects per place, so an unselected method is not stale: refresh only a problem.
+            const showTopRefresh = workspaceIdentity
+              ? summary.configured && (summary.health === "unavailable" || githubHealthNeedsAttention(summary))
+              : shouldShowGithubTopRefresh(summary, selected);
             const actions = (
               <div className="flex items-center gap-1">
                   {showTopRefresh ? (
@@ -736,6 +739,11 @@ export function GitHubSection({
                             <GithubIcon /> Configure repositories
                           </DropdownMenuItem>
                         ) : null}
+                        {workspaceIdentity && !showTopRefresh && (
+                          <DropdownMenuItem disabled={refreshing} onSelect={() => void refreshSnapshot(method)}>
+                            <RefreshCw /> Check connection
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem
                           onSelect={() => {
                             setSetup({ method, place: "shared" });
@@ -783,7 +791,7 @@ export function GitHubSection({
                 </div>
             );
             const detail = settingUp ? (
-                  <div className="border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3">
+                  <div className={detailCls}>
                     {method === "gh-cli" ? (
                       terminalOpen ? (
                         <InlineLoginTerminal
@@ -980,10 +988,10 @@ export function GitHubSection({
                       </div>
                     )}
                   </div>
-                ) : selected &&
+                ) : selected && !(workspaceIdentity && summary.health === "connected") &&
                   // An unavailable probe can be unconfigured but still needs a diagnosis.
                   (summary.configured || summary.health !== "not-connected") ? (
-                  <div className="border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3">
+                  <div className={detailCls}>
                     {summary.health === "connected" ? (
                       <div className="text-fg2 flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="flex items-center gap-2">
@@ -1029,18 +1037,19 @@ export function GitHubSection({
                   </div>
                 ) : null;
             if (workspaceIdentity) {
-              const hint = method === "gh-cli" ? (summary.login ? `@${summary.login} on this Mac` : "Local only")
-                : summary.login ? `@${summary.login}` : cloudMethod?.login ? `@${cloudMethod.login}` : githubMethodDescription(method);
-              return <div key={method}>
+              const hint = method === "gh-cli"
+                ? summary.login ? `@${summary.login} on this Mac` : "Local only"
+                : summary.login ? `@${summary.login}` : cloudMethod?.login ? `@${cloudMethod.login}` : "Not connected";
+              return <React.Fragment key={method}>
                 <SettingsRow label={workspaceMethodNames[method]} hint={hint} leading={<MethodIcon method={method} />}>
                   {actions}
                 </SettingsRow>
                 {!selected && summary.health !== "not-connected" && <HealthDetail summary={summary} />}
                 {cloudMethod?.configured && cloudMethod.health !== "connected" && (
-                  <p className="text-fg2 text-xs">Cloud · {cloudGithubHealthCopy[cloudMethod.health]}</p>
+                  <p className="text-fg2 m-0 text-xs">Cloud · {cloudGithubHealthCopy[cloudMethod.health]}</p>
                 )}
                 {detail}
-              </div>;
+              </React.Fragment>;
             }
             return (
               <div
@@ -1107,9 +1116,11 @@ export function GitHubSection({
           })}
         </List>
 
-        <p className="text-fg3 m-0 text-3xxs leading-4">
-          Switching keeps your other credentials.
-        </p>
+        {!workspaceIdentity && (
+          <p className="text-fg3 m-0 text-3xxs leading-4">
+            Switching keeps your other credentials.
+          </p>
+        )}
 
         {shared.read.error && owner && (
           <div className="text-fg2 text-xs" role="alert">

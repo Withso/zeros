@@ -35,6 +35,15 @@ describe("ListRow", () => {
     expect([...set].some((cls) => cls.includes("bg2-hover"))).toBe(false);
   });
 
+  it("hovers a settings row on the card's raised surface at the card's row height", () => {
+    const set = classes(render({ variant: "settings" }));
+    for (const cls of ["hover:bg-bg1-raised-hover", "rounded-lg", "-my-1.5", "py-1.5", "focus-visible:inset-ring-accent"]) {
+      expect(set, cls).toContain(cls);
+    }
+    expect(set.has("hover:bg-bg1-hover")).toBe(false);
+    expect(set.has("min-h-7")).toBe(false);
+  });
+
   // Regression: a transparent 1px border for the focus edge moved the row's
   // content 1px right of EventRow rows, so a subagent's disclosure slot no
   // longer sat on its child rail. The edge is an inset ring instead.

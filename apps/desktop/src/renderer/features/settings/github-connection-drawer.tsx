@@ -47,27 +47,27 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
   return <Sheet open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <SheetContent className="overflow-y-auto p-6">
       <SheetHeader><SheetTitle>@{connection.accountLogin}</SheetTitle>
-        <SheetDescription>{connection.level === "personal" ? "Your own connection. Nobody else sees it, admins included."
-          : personal ? "Connected for your projects." : "Connected for the organization."}</SheetDescription>
+        <SheetDescription>{connection.level === "personal" ? "Only you. Nobody else sees it, admins included."
+          : personal ? "Used by your projects." : "Shared with your organization."}</SheetDescription>
       </SheetHeader>
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList aria-label="Connection details"><TabsTrigger value="general">General</TabsTrigger><TabsTrigger value="repositories">Repositories</TabsTrigger></TabsList>
         <TabsContent value="general">
           {accessNotice}
           <SettingsGroup>
-            <SettingsRow label="GitHub account" hint={`@${connection.accountLogin}`}>
+            <SettingsRow label="Repository access" hint={canManage ? "Choose which repositories Zeros can read." : `Managed on GitHub by @${connection.accountLogin}.`}>
               {canManage && manageUrl && <Button variant="secondary" onClick={() => void shellOpenUrl(manageUrl).catch(cause => setError(message(cause)))}>Manage on GitHub<ExternalLink aria-hidden /></Button>}
             </SettingsRow>
-            {canManage && <SettingsRow label={confirm ? "Disconnect this account?" : "Disconnect account"}
-              hint={confirm ? "Projects using this connection may lose repository access." : undefined}>
+            {canManage && <SettingsRow label={confirm ? `Disconnect @${connection.accountLogin}?` : "Disconnect"}
+              hint="Projects using it lose access to its repositories.">
               {confirm && <Button disabled={busy} variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>}
-              <Button disabled={busy} variant={confirm ? "destructive" : "secondary"} onClick={() => confirm ? void disconnect() : setConfirm(true)}>Disconnect</Button>
+              <Button disabled={busy} variant={confirm ? "destructive" : "destructive-secondary"} onClick={() => confirm ? void disconnect() : setConfirm(true)}>Disconnect</Button>
             </SettingsRow>}
             {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
           </SettingsGroup>
         </TabsContent>
         <TabsContent value="repositories">
-          {accessNotice ?? <SettingsGroup title="Repositories" description="Everything this connection can read. Nothing to add here: pick them when you create a project.">
+          {accessNotice ?? <SettingsGroup description="Everything this connection can read. Nothing to add here: pick them when you create a project.">
             {!readable ? <SettingsRow label="Installation unavailable" /> : <>
               {read.loading && <MessageRow flush>Loading repositories…</MessageRow>}
               {read.error && <MessageRow tone="error" role="alert" flush>{message(read.error)}</MessageRow>}
@@ -78,7 +78,7 @@ export function GithubConnectionDrawer({ userId, organizationId, connection, can
               <div className="flex items-center gap-2">
                 {page > 1 && <Button onClick={() => setPage(page - 1)}>Previous page</Button>}
                 {nextPage && <Button onClick={() => setPage(nextPage)}>Next page</Button>}
-                <Button variant="ghost" onClick={read.refresh}>Refresh repositories</Button>
+                <Button variant="ghost" size="compact" onClick={read.refresh}>Refresh repositories</Button>
               </div>
             </>}
           </SettingsGroup>}

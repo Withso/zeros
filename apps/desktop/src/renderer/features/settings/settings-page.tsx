@@ -37,7 +37,6 @@ import {
   Palette,
   Settings,
   ArrowLeft,
-  ChevronRight,
   Astroid,
   SquareTerminal,
   Blocks,
@@ -141,7 +140,6 @@ import {
 } from "../repositories/repositories-panel";
 import { repoPageViewForSection } from "../repositories/repo-page";
 import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-button";
-import { ListRow } from "../../shared/ui/primitives/list-row";
 import { GitHubSection } from "./github-section";
 import { useSharedGithub } from "./use-shared-github";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
@@ -173,10 +171,13 @@ import { subscribeUserSettingsSection } from "./settings-navigation";
 import {
   SETTINGS_CARD_LIST_CLS,
   SettingsGroup,
+  SettingsLinkRow,
   SettingsList,
   SettingsRow,
   SettingsSection,
 } from "./settings-ui";
+import { GithubIdentityHint, connectionCount } from "./github-provider-hint";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useEnabledAgents } from "../agent/enabled-agents";
 import { loadAgents } from "../agent/agents-cache";
@@ -947,24 +948,29 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   >
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
-                        {provider && !directory && (
-                          <Button variant="ghost" size="compact" className="self-start" onClick={() => showProviderDirectory(section.id)}>
-                            <ArrowLeft aria-hidden /> Back to {section.label}
-                          </Button>
-                        )}
-                        <h1 className={PAGE_HEADING_CLS}>{provider && !directory ? "GitHub" : (unified && section.unifiedLabel) || section.label}</h1>
+                        {provider && !directory ? (
+                          <div className="flex min-w-0 items-center gap-2">
+                            <IconButton size="compact" label={`Back to ${section.label}`} onClick={() => showProviderDirectory(section.id)}>
+                              <ArrowLeft aria-hidden />
+                            </IconButton>
+                            <h1 className={cn(PAGE_HEADING_CLS, "flex items-center gap-2")}><GithubIcon aria-hidden />GitHub</h1>
+                          </div>
+                        ) : <h1 className={PAGE_HEADING_CLS}>{(unified && section.unifiedLabel) || section.label}</h1>}
                         {description && (
                           <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
                         )}
                       </div>
-                      {!(unified && organizationPage) && fileScopeControls}
+                      {/* GitHub sign-in isn't in settings.toml; its provider page has no file to open. */}
+                      {!(unified && organizationPage) && !(provider && !directory) && fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
                     {provider && directory ? (
                       <SettingsList>
-                        <ListRow variant="panel" aria-label={section.id === "integrations" ? "Open GitHub integration" : "Open GitHub connections"} onClick={() => showProviderDirectory(null)}>
-                          <GithubIcon /><span className="flex-1">GitHub</span><ChevronRight aria-hidden />
-                        </ListRow>
+                        <SettingsLinkRow label="GitHub" leading={<GithubIcon className="text-fg2 size-4" aria-hidden />}
+                          hint={section.id === "integrations" ? <GithubIdentityHint accountId={me?.user.id} />
+                            : githubLevels.connections ? connectionCount(githubLevels.connections) : undefined}
+                          aria-label={section.id === "integrations" ? "Open GitHub integration" : "Open GitHub connections"}
+                          onClick={() => showProviderDirectory(null)} />
                       </SettingsList>
                     ) : <Panel surfaceActive={pageActive && isActive} unified={unified} openCloudRepository={openCloudRepository}
                       onConfigureIdentity={() => setActive(userSelection("integrations"))}
@@ -1431,7 +1437,10 @@ function OrganizationGithubPanel({ surfaceActive = true, onConfigureIdentity }: 
       userId={me.user.id} organizationId={organization.id} organizationName={organization.name} canManage={canManage}
       active={surfaceActive} onConfigureIdentity={onConfigureIdentity} />
     {canManage && <PersonalProjectsSetting userId={me.user.id} organizationId={organization.id} canManage active={surfaceActive} />}
-    <Button className="self-start" variant="ghost" onClick={onConfigureIdentity}>Configure account identity</Button>
+    <SettingsList>
+      <SettingsLinkRow label="Configure account identity" hint="The GitHub sign-in agents use on this Mac and in Cloud."
+        onClick={() => onConfigureIdentity?.()} />
+    </SettingsList>
   </div>;
 }
 
