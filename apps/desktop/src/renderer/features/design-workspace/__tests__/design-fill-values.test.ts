@@ -73,6 +73,23 @@ describe("design fill values", () => {
     );
   });
 
+  it("preserves a var() gradient angle and token stops across partial edits", () => {
+    const parsed = parseDesignGradient(
+      "linear-gradient(var(--gradient-angle), var(--accent), var(--success))",
+    );
+    expect(parsed).toMatchObject({
+      angle: "var(--gradient-angle)",
+      start: "var(--accent)",
+      end: "var(--success)",
+    });
+    expect(formatDesignGradient({ ...parsed!, end: "#FFFFFF" })).toBe( // check:ui ignore-line -- authored CSS fixture
+      "linear-gradient(var(--gradient-angle), var(--accent) 0%, #FFFFFF 100%)", // check:ui ignore-line -- authored CSS fixture
+    );
+    expect(formatDesignGradient({ ...parsed!, angle: 90 })).toBe(
+      "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
+    );
+  });
+
   it("fails closed for gradients the two-stop editor cannot preserve", () => {
     expect(
       parseDesignGradient("linear-gradient(red, yellow 50%, blue)"),

@@ -2,7 +2,7 @@ export type DesignFillType = "solid" | "gradient" | "image";
 
 export interface DesignGradientValue {
   type: "linear" | "radial" | "conic";
-  angle: number;
+  angle: number | string;
   start: string;
   end: string;
   startPosition?: string;
@@ -134,15 +134,26 @@ const LINEAR_DIRECTIONS: Readonly<Record<string, number>> = {
   "to left top": 315,
 };
 
-function linearAngle(value: string): number | null {
+function angleToken(value: string): string | null {
+  const source = value.trim();
+  return /^var\(\s*--[\w-]+(?:\s*,[\s\S]*)?\)$/i.test(source) ? source : null;
+}
+
+function numericAngle(value: string): number | null {
+  const match = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/.exec(value);
+  if (!match?.[1]) return null;
+  const angle = Number(match[1]);
+  return Number.isFinite(angle) ? angle : null;
+}
+
+function linearAngle(value: string): number | string | null {
+  const token = angleToken(value);
+  if (token) return token;
   const source = value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
   if (Object.hasOwn(LINEAR_DIRECTIONS, source)) {
     return LINEAR_DIRECTIONS[source]!;
   }
-  const match = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/.exec(source);
-  if (!match?.[1]) return null;
-  const angle = Number(match[1]);
-  return Number.isFinite(angle) ? angle : null;
+  return numericAngle(source);
 }
 
 /** Parse only gradients this two-stop editor can round-trip faithfully. */
@@ -155,7 +166,7 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
   const parts = splitTopLevel(match[3]);
   if (!parts || parts.length < 2 || parts.length > 3) return null;
 
-  let angle = type === "linear" ? 180 : 0;
+  let angle: number | string = type === "linear" ? 180 : 0;
   if (parts.length === 3) {
     const prelude = parts.shift()!;
     if (/^in\s+/i.test(prelude)) return null;
@@ -166,12 +177,12 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     } else if (type === "radial") {
       if (prelude.trim().toLocaleLowerCase() !== "circle") return null;
     } else {
-      const conic = /^from\s+([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/i.exec(
-        prelude.trim(),
-      );
+      const conic = /^from\s+(.+)$/i.exec(prelude.trim());
       if (!conic?.[1]) return null;
-      angle = Number(conic[1]);
-      if (!Number.isFinite(angle)) return null;
+      const parsed =
+        angleToken(conic[1]) ?? numericAngle(conic[1].toLocaleLowerCase());
+      if (parsed === null) return null;
+      angle = parsed;
     }
   }
 
@@ -196,18 +207,23 @@ function number(value: number): string {
 export function formatDesignGradient(gradient: DesignGradientValue): string {
   const prefix = gradient.repeating ? "repeating-" : "";
   const colors = `${gradient.start} ${gradient.startPosition ?? "0%"}, ${gradient.end} ${gradient.endPosition ?? "100%"}`;
-  const angle = Number.isFinite(gradient.angle)
-    ? gradient.angle
-    : gradient.type === "linear"
-      ? DEFAULT_DESIGN_GRADIENT.angle
-      : 0;
+  const numeric =
+    typeof gradient.angle === "number" && Number.isFinite(gradient.angle)
+      ? gradient.angle
+      : gradient.type === "linear"
+        ? 180
+        : 0;
+  const angle =
+    typeof gradient.angle === "string" && gradient.angle.trim()
+      ? gradient.angle.trim()
+      : `${number(numeric)}deg`;
   if (gradient.type === "radial") {
     return `${prefix}radial-gradient(circle, ${colors})`;
   }
   if (gradient.type === "conic") {
-    return `${prefix}conic-gradient(from ${number(angle)}deg, ${colors})`;
+    return `${prefix}conic-gradient(from ${angle}, ${colors})`;
   }
-  return `${prefix}linear-gradient(${number(angle)}deg, ${colors})`;
+  return `${prefix}linear-gradient(${angle}, ${colors})`;
 }
 
 export function readDesignImageUrl(value: string): string {
