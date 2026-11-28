@@ -565,6 +565,21 @@ it("holds changed picture demand until camera input rests", async () => {
   expect(renders[1].maxDimension).toBe(1280);
 });
 
+it("drops a deferred demand when its canvas clears it", async () => {
+  let quiet = 0;
+  const { previews, renders, settle, advance, token } = harness({ quietMs: () => quiet });
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  expect(renders).toHaveLength(1);
+
+  quiet = 500;
+  previews.setDemand(token, demand(local, [["a.html", 1, "detail"]]));
+  previews.setDemand(token, null);
+  quiet = 0;
+  await advance(500);
+  expect(renders).toHaveLength(1);
+});
+
 it("repaints a reopened canvas from disk without rendering anything", async () => {
   const store = memoryStore();
   const first = harness({ store });
