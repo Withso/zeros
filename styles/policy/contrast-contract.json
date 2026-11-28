@@ -234,6 +234,16 @@
       "why": "Solid Accept both fills on a merge conflict, at rest and on hover."
     },
     {
+      "role": "text",
+      "fg": [
+        "violet-solid-fg"
+      ],
+      "on": [
+        "violet-solid"
+      ],
+      "why": "Component and instance selection badges on the Design canvas."
+    },
+    {
       "role": "supplemental",
       "fg": [
         "fg2"
