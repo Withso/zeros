@@ -154,6 +154,16 @@ describe("Design frame surface residency", () => {
     expect(rested.live.size).toBeGreaterThan(0);
   });
 
+  it("keeps an already-live frame's document through a camera gesture", () => {
+    const frames = [{ ...frame("home.html", 0), width: 1440, height: 1000, sourceVersion: "a".repeat(24) }];
+    const input = { ...setup(frames), viewport: { width: 1440, height: 1000 }, devicePixelRatio: 2 };
+    const read = createDesignFrameResidencyReader();
+    expect(read({ ...input, view: { zoom: 8, panX: -800, panY: -400 } }).live).toEqual(new Set(["home.html"]));
+    // Swapping it for its picture mid-pan dropped the Retina tile for frames.
+    const panning = read({ ...input, view: { zoom: 8, panX: -980, panY: -400 }, gesture: true });
+    expect(panning.live).toEqual(new Set(["home.html"]));
+  });
+
   it("keeps a zoom's page mounted between its steps, loads sources for large frames, and trims once the camera rests", () => {
     const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
       sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
