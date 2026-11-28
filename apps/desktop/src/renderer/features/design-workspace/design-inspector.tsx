@@ -1058,7 +1058,9 @@ export function InspectorEditField({
                 event.preventDefault();
                 arrowSequenceRef.current ??= { start: baselineRef.current };
                 const resolved = withinRange(next);
-                setArrowStepping(resolved !== arrowSequenceRef.current.start);
+                const moved = resolved !== arrowSequenceRef.current.start;
+                if (!moved) arrowSequenceRef.current = null;
+                setArrowStepping(moved);
                 setPresentedDraft(resolved);
                 preview(resolved);
               }
