@@ -19,7 +19,7 @@
   border-radius: 50%;
   background: var(--design-selection-handle-fill) padding-box;
   box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
-  cursor: nwse-resize;
+  cursor: var(--design-radius-cursor, nwse-resize);
   pointer-events: auto;
   /* Above the selection's spacing zones inside the transformed canvas. */
   z-index: var(--z-panel);
@@ -1444,13 +1444,19 @@
     [data-design-resize-edge],
     [data-design-resize-handle]
   ),
+[data-design-active-tool="rectangle"]
+  :where(
+    [data-design-element-overlay],
+    [data-design-resize-edge],
+    [data-design-resize-handle]
+  ),
 [data-design-active-tool="text"]
   :where(
     [data-design-element-overlay],
     [data-design-resize-edge],
     [data-design-resize-handle]
   ) {
-  cursor: crosshair !important;
+  cursor: var(--design-tool-cursor, crosshair) !important;
 }
 
 .zd-design-motion-keyframe {

@@ -113,6 +113,30 @@ export async function runDesignCanvasCursorSmoke({ page, check }) {
     JSON.stringify(Object.fromEntries(strays.map((kind) => [kind, sweep[kind]]))),
   );
 
+  // The drawing tools show Figma's thin crosshair and the Text tool its
+  // I-beam, on the empty canvas and over a selection's body and handles.
+  const toolCursors = {};
+  for (const [key, tool] of [["r", "rectangle"], ["f", "frame"], ["t", "text"]]) {
+    await page.locator("[data-design-canvas-viewport]").focus();
+    await page.keyboard.press(key);
+    await expect(page.locator(`[data-design-canvas-viewport][data-design-active-tool="${tool}"]`)).toHaveCount(1);
+    toolCursors[tool] = {
+      empty: await cursorAt(empty),
+      body: await cursorAt(hero),
+      handle: await cursorOf(handle("nw")),
+    };
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-design-canvas-viewport][data-design-active-tool="select"]')).toHaveCount(1);
+  }
+  const crosshair = { empty: "crosshair", body: "crosshair", handle: "crosshair" };
+  check(
+    "the Rectangle and Frame tools show the crosshair and the Text tool the I-beam",
+    JSON.stringify(toolCursors) === JSON.stringify({
+      rectangle: crosshair, frame: crosshair, text: { empty: "text", body: "text", handle: "text" },
+    }),
+    JSON.stringify(toolCursors),
+  );
+
   await page.mouse.down();
   await page.mouse.move(hero.x + 24, hero.y + 12, { steps: 4 });
   const dragging = cursorKind(await page.evaluate(() => document.body.style.cursor));
