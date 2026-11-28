@@ -692,6 +692,13 @@ describe("design workspace interaction wiring", () => {
     const radiusHandle = /\.zd-design-radius-handle \{([^}]*)\}/.exec(uiSource)?.[1] ?? "";
     expect(radiusHandle).toContain("background: var(--design-selection-handle-fill)");
     expect(radiusHandle).not.toContain("var(--bg1)");
+    expect(radiusHandle).toContain("var(--design-radius-inset)");
+    expect(radiusHandle).toContain("opacity: 0");
+    expect(radiusHandle).toContain("pointer-events: none");
+    expect(uiSource).toMatch(/\.zd-design-radius-handle:is\(\[data-near\], \[data-value\], :focus-visible\) \{[^}]*pointer-events: auto/);
+    expect(uiSource).toContain(".zd-design-radius-handle:is([data-near], [data-value], :focus-visible)");
+    expect(source).toContain("target.dataset.value = String(value)");
+    expect(source).not.toContain("`Radius ${value}`");
     const componentSelection = /\[data-design-frame-component\]\[data-design-frame-root-selected\] \{([^}]*)\}/
       .exec(uiSource)?.[1] ?? "";
     expect(componentSelection).toContain("--design-selection-stroke:");
