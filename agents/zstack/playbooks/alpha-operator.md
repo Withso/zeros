@@ -7,8 +7,15 @@ WorkOS. Never use Production credentials or data.
 
 - Get the owner's approval for the specific write. A read needs none, but it
   must stay read-only.
-- Read credentials into memory from `.env.agent`. Never pass them as
-  arguments, never print them, and redact tokens from any output you keep.
+- Use the Zeros Internal MCP tools for provider reads and Alpha writes: call
+  `whoami` first, then the `check_*`, `railway_*`, `db_query`, `boat_*`,
+  `r2_*`, `workos_*` or `planetscale_*` tool the step needs, and follow any
+  approval it requests (`approval_status`, `approval_resume`). Connect a
+  client with `apps/control-plane/INTERNAL-OPS.md`. Never copy provider keys
+  into a checkout. Repository operators that still need fixture credentials
+  read them in memory from an operator's explicitly imported `.env.agent`;
+  never pass them as arguments, never print them, and redact tokens from any
+  output you keep.
 - Prefer the repository's operators (`apps/control-plane/src/manage-*.ts`).
   They plan, machine-verify the exact expected previous state, execute, then
   read back. Stop on any mismatch; never widen a plan to make it pass. The

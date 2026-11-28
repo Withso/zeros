@@ -58,7 +58,9 @@ Setup installs Node 22, the repository's pinned pnpm, Bun, native build tools,
 and locked dependencies. macOS may require completing the Xcode Command Line
 Tools dialog or authenticating the Homebrew installer. The command can be rerun.
 It imports the profile with private permissions into `~/.zeros-dev/zeros-dev-env.json`
-and the main checkout so future workspaces can copy it. It also configures native
+and the main checkout. Linked worktrees can resolve the machine profile from
+home. Development agents use the [Zeros Internal MCP](apps/control-plane/INTERNAL-OPS.md)
+for infrastructure checks. Setup also configures native
 Zeros repository scripts with required, retryable Archive cleanup, preserving
 existing Setup/Run commands and reporting Archive conflicts. Start with
 [zeros-dev-env-example.json](zeros-dev-env-example.json) when configuring the

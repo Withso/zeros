@@ -1,13 +1,19 @@
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
 import {
   KNOWN_KEYS,
+  OPERATOR_TEMPLATE_KEYS,
+  PROVIDER_KEYS,
   SECRET_KEYS,
   checkFile,
+  checkLinkedWorktrees,
+  gitWorktrees,
   checkZerosDevValues,
   formatResults,
   parseAgentEnv,
@@ -234,13 +240,60 @@ describe("agent credential check", () => {
     expect(seen).not.toContain("api.workos.com");
   });
 
-  it("keeps the template tracked, complete and free of values", () => {
-    const template = parseAgentEnv(readFileSync(".env.agent.example", "utf8"));
+  it("keeps the template tracked, operator-only and free of values", () => {
+    const text = readFileSync(".env.agent.example", "utf8");
+    const template = parseAgentEnv(text);
     expect(template.malformedLines).toEqual([]);
-    for (const key of KNOWN_KEYS) expect(template.values.has(key)).toBe(true);
-    for (const key of SECRET_KEYS) expect(template.values.get(key)).toBe("");
+    expect(template.duplicateKeys).toEqual([]);
+    expect([...template.values.keys()].sort()).toEqual([...OPERATOR_TEMPLATE_KEYS].sort());
+    for (const key of OPERATOR_TEMPLATE_KEYS) expect(KNOWN_KEYS).toContain(key);
+    for (const key of SECRET_KEYS) expect(template.values.get(key) ?? "").toBe("");
+    expect(text).toContain("Zeros Internal MCP");
+    expect(text).toContain("agent-env.mjs import");
     expect(() => execFileSync("git", ["check-ignore", "-q", ".env.agent.example"])).toThrow();
     expect(execFileSync("git", ["check-ignore", ".env.agent"]).toString().trim()).toBe(".env.agent");
+  });
+
+  it("points agents at the Zeros Internal MCP when there is no .env.agent", () => {
+    const results = checkFile({ exists: false, mode: null, parsed: parseAgentEnv("") });
+    expect(results.find((r) => r.id === "mcp")).toMatchObject({ status: "skip", detail: expect.stringContaining("whoami") });
+    expect(formatResults(results, "process environment")).toContain("check_*");
+  });
+
+  it("warns about provider keys in linked worktrees by path and count only", () => {
+    const files: Record<string, string> = {
+      "/main/.env.agent": `CLOUDFLARE_API_TOKEN=${VALUES.CLOUDFLARE_API_TOKEN}\n`,
+      "/linked/.env.agent": `BOAT_API_KEY=${VALUES.BOAT_API_KEY}\nWORKOS_ALPHA_API_KEY=${VALUES.WORKOS_ALPHA_API_KEY}\nZEROS_DEV_PASSWORD=x\n`,
+      "/fixture-only/.env.agent": "ZEROS_DEV_PASSWORD=x\nZEROS_DEV_EMAIL=fixture@example.test\nBOAT_API_KEY=\n",
+    };
+    const read = (file: string) => { if (!(file in files)) throw new Error("ENOENT"); return files[file]; };
+    const results = checkLinkedWorktrees(["/main", "/linked", "/fixture-only", "/no-file"], read);
+    expect(results).toEqual([expect.objectContaining({ id: "worktree", status: "warn" })]);
+    expect(results[0].detail).toContain(`${path.join("/linked", ".env.agent")} holds 2 provider key(s)`);
+    expect(results[0].detail).toContain("Zeros Internal MCP");
+    expect(JSON.stringify(results)).not.toContain(VALUES.BOAT_API_KEY);
+    for (const key of PROVIDER_KEYS) expect(SECRET_KEYS).toContain(key);
+  });
+
+  it("lists the main checkout first, then linked worktrees, skipping unbounded files", () => {
+    const home = realpathSync(mkdtempSync(path.join(tmpdir(), "agent-check-")));
+    try {
+      const main = path.join(home, "main"), linked = path.join(home, "linked worktree");
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: home, encoding: "utf8", stdio: "pipe" });
+      git("init", "-q", main);
+      git("-C", main, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "initial");
+      git("-C", main, "worktree", "add", "-q", "-b", "feature", linked);
+      expect(gitWorktrees(linked)).toEqual([main, linked]);
+      symlinkSync("/dev/zero", path.join(linked, ".env.agent"));
+      expect(checkLinkedWorktrees(gitWorktrees(main))).toEqual([]);
+      writeFileSync(path.join(main, "big.env"), `BOAT_API_KEY=x\n${"#".repeat(300 * 1024)}\n`);
+      rmSync(path.join(linked, ".env.agent"));
+      symlinkSync(path.join(main, "big.env"), path.join(linked, ".env.agent"));
+      expect(checkLinkedWorktrees(gitWorktrees(main))).toEqual([]);
+      rmSync(path.join(linked, ".env.agent"));
+      writeFileSync(path.join(linked, ".env.agent"), "BOAT_API_KEY=x\n");
+      expect(checkLinkedWorktrees(gitWorktrees(main))).toHaveLength(1);
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   it("checks zeros-dev fixture presence locally without authenticating or echoing a password",()=>{

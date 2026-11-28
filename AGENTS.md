@@ -119,12 +119,18 @@ to the renderer. For `zeros local`, start with its shipped skill and CLI help.
 
 ## Agent credentials
 
-- Live checks use the gitignored `.env.agent` at the repository root; its
-  template is `.env.agent.example`, and Conductor copies it into new
-  workspaces. It holds Alpha and test credentials only: never add Production
-  keys.
-- Run `pnpm agent:check` to verify it read-only. Never print, log, commit or
-  echo a credential value, including in command arguments and test output.
+- Agents reach Alpha providers through the Zeros Internal MCP
+  (`https://internal.zeros.build/mcp`), never through copied provider keys.
+  Call `whoami` first, then the `check_*` and other tools the task needs.
+  Clients connect by signing in as a Zeros Internal person (Cloudflare Access
+  OAuth): Conductor Settings → MCP for workspaces, the client's own MCP
+  settings elsewhere ([connect a client](apps/control-plane/INTERNAL-OPS.md)).
+  No tracked `.mcp.json`; new worktrees receive no `.env.agent`.
+- Operator fixtures (gate0, rehearsal) may use a private `.env.agent` in a
+  trusted checkout, imported explicitly; Alpha and test credentials only,
+  never Production keys. `pnpm agent:check` verifies it read-only; without
+  one it points to the MCP. Never print, log, commit or echo a credential
+  value, including in command arguments and test output.
 - Commits and pull requests use the workspace's own Git and GitHub identity,
   so authorship stays with whoever is working; the `Co-Authored-By` trailer
   records the agent. Never author a commit as `zeros-agent[bot]`.

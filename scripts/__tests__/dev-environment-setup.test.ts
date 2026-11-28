@@ -9,7 +9,7 @@ import { loadHostedProfile } from "../dev-environment/hosted-profile.mjs";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 function fixture() {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-setup-")); roots.push(home);
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-setup-"))); roots.push(home);
   const root = path.join(home, "main checkout"), source = path.join(home, "transfer.json");
   fs.mkdirSync(root, { mode: 0o700 });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" });
@@ -34,6 +34,26 @@ function fixture() {
   return { home, root, source, git, profile, writeSource };
 }
 
+function installFixtureScripts(root: string, home: string) {
+  const repository = path.resolve(import.meta.dirname, "../..");
+  fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(root, "scripts/dev-environment"), { recursive: true });
+  for (const file of ["agent-env-check.mjs", "dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(root, "scripts", file));
+  fs.writeFileSync(path.join(root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
+  fs.writeFileSync(path.join(root, "scripts/dev-environment/dependencies.mjs"),
+    'if (process.argv[2] !== "--install") process.exit(1); console.log("install requested");');
+  const bin = path.join(home, ".zeros-dev/tools/bin");
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(path.join(bin, "node"))) fs.symlinkSync(process.execPath, path.join(bin, "node"));
+}
+
+function runFixtureSetup(root: string, home: string, env: Record<string, string> = {}, manual = false) {
+  installFixtureScripts(root, home);
+  return execFileSync(manual ? process.execPath : "sh", manual ? ["scripts/dev-environment/setup.mjs", "--profile-only"] : ["scripts/dev-environment/hook.sh", "setup"], {
+    cwd: root, env: { PATH: process.env.PATH, HOME: home, NODE_OPTIONS: "--require ./qualified-node.cjs", ...env }, encoding: "utf8", stdio: "pipe",
+  });
+}
+
 describe("secure portable Dev setup", () => {
   it("imports an injected cloud profile privately before backend/archive profile resolution", () => {
     const f = fixture(), destination = path.join(f.root, "zeros-dev-env.json");
@@ -51,15 +71,9 @@ describe("secure portable Dev setup", () => {
   });
 
   it("imports the cloud setting through actual setup without printing credentials", () => {
-    const f = fixture(), repository = path.resolve(import.meta.dirname, "../..");
-    fs.cpSync(path.join(repository, "scripts/dev-environment"), path.join(f.root, "scripts/dev-environment"), { recursive: true });
-    for (const file of ["dev-auth-profile.mjs", "dev-ports.mjs", "electron-local-process-group.mjs"]) fs.copyFileSync(path.join(repository, "scripts", file), path.join(f.root, "scripts", file));
-    fs.writeFileSync(path.join(f.root, "qualified-node.cjs"), 'Object.defineProperty(process.versions, "node", {value: "22.18.0"});');
-    fs.writeFileSync(path.join(f.root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.0.0" }));
+    const f = fixture();
     const value = Buffer.from(JSON.stringify(f.profile)).toString("base64");
-    const output = execFileSync(process.execPath, ["-r", "./qualified-node.cjs", "scripts/dev-environment/setup.mjs", "--profile-only"], {
-      cwd: f.root, env: { PATH: process.env.PATH, HOME: f.home, ZEROS_DEV_PROFILE_B64: value }, encoding: "utf8", stdio: "pipe",
-    });
+    const output = runFixtureSetup(f.root, f.home, { ZEROS_DEV_PROFILE_B64: value });
     expect(JSON.parse(fs.readFileSync(path.join(f.root, "zeros-dev-env.json"), "utf8"))).toEqual(f.profile);
     expect(output).not.toContain(value); expect(output).not.toContain(f.profile.cloudflare.apiToken);
   });
@@ -101,8 +115,127 @@ describe("secure portable Dev setup", () => {
       expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     }
     expect(f.git("status", "--porcelain")).toBe("");
-    expect(f.git("ls-files", "--others", "--ignored", "--exclude-from", path.resolve(import.meta.dirname, "../../.worktreeinclude"))).toBe("zeros-dev-env.json\n");
     expect(importDevelopmentProfile({ root: worktree, homeDir: f.home, source: f.source }).files).toHaveLength(3);
+  });
+
+  it("keeps gateway and provider credentials out of new agent worktrees", () => {
+    const f = fixture();
+    for (const file of [".env.agent", ".env.local", "zeros-dev-env.json", ".mcp.json", "apps/control-plane/.env", "apps/web/.dev.vars", ".conductor/settings.local.toml"]) {
+      fs.mkdirSync(path.dirname(path.join(f.root, file)), { recursive: true });
+      fs.writeFileSync(path.join(f.root, file), "private fixture");
+    }
+    expect(f.git("ls-files", "--others", "--ignored", "--exclude-from", path.resolve(import.meta.dirname, "../../.worktreeinclude"))).toBe("");
+  });
+
+  it("launches from a linked worktree with a checkout-only private Dev profile without copying it", () => {
+    const f = fixture(), worktree = path.join(f.home, "linked worktree");
+    f.git("worktree", "add", "-qb", "feature", worktree);
+    fs.writeFileSync(path.join(f.root, "zeros-dev-env.json"), JSON.stringify(f.profile), { mode: 0o600 });
+    runFixtureSetup(worktree, f.home);
+    expect(fs.existsSync(path.join(f.home, ".zeros-dev/zeros-dev-env.json"))).toBe(false);
+    expect(loadHostedProfile(worktree, { homeDir: f.home, env: {} })).toEqual(f.profile);
+    expect(fs.existsSync(path.join(worktree, "zeros-dev-env.json"))).toBe(false);
+  });
+
+  it("allows checkout setup for an Ops client without a private fixture profile", () => {
+    const f = fixture();
+    expect(runFixtureSetup(f.root, f.home)).toContain("install requested");
+    expect(fs.existsSync(path.join(f.root, "zeros-dev-env.json"))).toBe(false);
+  });
+
+  it("keeps manual profile-only imports distinct from profile-optional hook setup", () => {
+    const f = fixture();
+    expect(() => runFixtureSetup(f.root, f.home, {}, true)).toThrow();
+    const valid = fixture();
+    runFixtureSetup(valid.root, valid.home, { ZEROS_DEV_PROFILE_PATH: valid.source }, true);
+    expect(fs.readFileSync(path.join(valid.root, "zeros-dev-env.json"))).toEqual(fs.readFileSync(valid.source));
+  });
+
+  describe("operator .env.agent in new workspaces", () => {
+    const secret = "agent-env-private-sentinel";
+    const linked = () => {
+      const f = fixture(), worktree = path.join(f.home, "linked worktree");
+      f.git("worktree", "add", "-qb", "feature", worktree);
+      return { ...f, worktree };
+    };
+    const failure = (run: () => unknown) => {
+      try { run(); } catch (error) { const e = error as { stdout?: string; stderr?: string }; return `${e.stdout ?? ""}${e.stderr ?? ""}`; }
+      throw new Error("expected setup to refuse");
+    };
+    const importAgentEnv = (root: string, home: string, ...args: string[]) => {
+      installFixtureScripts(root, home);
+      return execFileSync(process.execPath, ["scripts/dev-environment/agent-env.mjs", "import", ...args], {
+        cwd: root, env: { PATH: process.env.PATH, HOME: home }, encoding: "utf8", stdio: "pipe",
+      });
+    };
+
+    it("refuses a copied .env.agent in a new linked worktree before installing dependencies", () => {
+      const f = linked();
+      fs.writeFileSync(path.join(f.worktree, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      const output = failure(() => runFixtureSetup(f.worktree, f.home));
+      expect(output).toContain("Zeros Internal MCP");
+      expect(output).toContain("rm .env.agent && sh scripts/dev-environment/hook.sh setup");
+      expect(output).toContain("node scripts/dev-environment/agent-env.mjs import .env.agent && sh scripts/dev-environment/hook.sh setup");
+      expect(output).not.toContain("install requested");
+      expect(output).not.toContain(secret);
+    });
+
+    it("continues after following either command the refusal names", () => {
+      const agent = linked();
+      fs.writeFileSync(path.join(agent.worktree, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      failure(() => runFixtureSetup(agent.worktree, agent.home));
+      fs.rmSync(path.join(agent.worktree, ".env.agent"));
+      expect(runFixtureSetup(agent.worktree, agent.home)).toContain("install requested");
+
+      const operator = linked(), file = path.join(operator.worktree, ".env.agent");
+      fs.writeFileSync(file, `ZEROS_DEV_PASSWORD=${secret}\n`, { mode: 0o644 });
+      failure(() => runFixtureSetup(operator.worktree, operator.home));
+      const output = importAgentEnv(operator.worktree, operator.home, ".env.agent");
+      expect(output).toContain("1 keys"); expect(output).not.toContain(secret);
+      expect(fs.readFileSync(file, "utf8")).toBe(`ZEROS_DEV_PASSWORD=${secret}\n`);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      expect(runFixtureSetup(operator.worktree, operator.home)).toContain("install requested");
+    });
+
+    it("refuses a copied .env.agent in a Conductor workspace clone", () => {
+      const f = fixture();
+      fs.writeFileSync(path.join(f.root, ".env.agent"), `CLOUDFLARE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+      expect(failure(() => runFixtureSetup(f.root, f.home, { CONDUCTOR_WORKSPACE_PATH: f.root }))).toContain("Zeros Internal MCP");
+    });
+
+    it("never creates .env.agent and leaves a trusted main checkout's operator file alone", () => {
+      const f = linked();
+      expect(runFixtureSetup(f.worktree, f.home)).toContain("install requested");
+      expect(fs.existsSync(path.join(f.worktree, ".env.agent"))).toBe(false);
+      fs.writeFileSync(path.join(f.root, ".env.agent"), `ZEROS_DEV_PASSWORD=${secret}\n`, { mode: 0o600 });
+      expect(runFixtureSetup(f.root, f.home)).toContain("install requested");
+      expect(fs.readFileSync(path.join(f.root, ".env.agent"), "utf8")).toContain(secret);
+    });
+
+    it("keeps an explicit operator import that later setup accepts", () => {
+      const f = linked(), source = path.join(f.home, "operator.env");
+      fs.writeFileSync(source, `ZEROS_DEV_PASSWORD=${secret}\nZEROS_DEV_EMAIL=fixture@example.test\n`, { mode: 0o644 });
+      const output = importAgentEnv(f.worktree, f.home, source);
+      expect(output).toContain("2 keys");
+      expect(output).not.toContain(secret);
+      const destination = path.join(f.worktree, ".env.agent");
+      expect(fs.readFileSync(destination)).toEqual(fs.readFileSync(source));
+      expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
+      expect(f.git("-C", f.worktree, "status", "--porcelain", "--", ".env.agent")).toBe("");
+      expect(failure(() => importAgentEnv(f.worktree, f.home, source))).toContain("--replace");
+      importAgentEnv(f.worktree, f.home, source, "--replace");
+      expect(runFixtureSetup(f.worktree, f.home)).toContain("install requested");
+    });
+
+    it("refuses malformed or missing import sources without echoing them", () => {
+      const f = linked(), source = path.join(f.home, "operator.env");
+      fs.writeFileSync(source, `ZEROS_DEV_PASSWORD=${secret}\n${secret}\n`, { mode: 0o600 });
+      const output = failure(() => importAgentEnv(f.worktree, f.home, source));
+      expect(output).toContain("line(s) 2");
+      expect(output).not.toContain(secret);
+      expect(failure(() => importAgentEnv(f.worktree, f.home))).toContain("usage");
+      expect(fs.existsSync(path.join(f.worktree, ".env.agent"))).toBe(false);
+    });
   });
 
   it("validates without reading providers or changing permissions in check mode", () => {

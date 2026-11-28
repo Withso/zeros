@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 import { developmentProfilePath, profileExists } from "./profile-path.mjs";
 import { hostedProfilePath } from "./hosted-profile.mjs";
 import { importDevelopmentProfile, inspectDevelopmentProfile } from "./setup-profile.mjs";
-import { developmentHome, privateDirectory, systemEnvironment, writePrivateFile } from "./state.mjs";
+import { assertNoCopiedAgentEnv } from "./agent-env.mjs";
+import { developmentHome, privateDirectory, readPrivateJson, systemEnvironment, writePrivateFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
@@ -54,6 +55,9 @@ async function main() {
   const [major, minor] = process.versions.node.split(".").map(Number);
   const injected = !check && profileIndex < 0 && !process.env.ZEROS_DEV_PROFILE_PATH && !profileExists(source) && Boolean(process.env.ZEROS_DEV_PROFILE_B64);
   if (injected) source = hostedProfilePath(root);
+  const automatic = args.length === 1 && args[0] === "--checkout";
+  if (automatic) assertNoCopiedAgentEnv(root);
+  if (automatic && !profileExists(source) && !process.env.ZEROS_DEV_PROFILE_PATH) return;
   const issues = inspectDevelopmentProfile(source).issues;
   if (major !== 22 || minor < 18) {
     issues.push("Use Node 22.18 or newer in the 22.x release line, matching CI/backend. Run bash scripts/setup-zeros-dev.sh to install it.");
@@ -70,6 +74,11 @@ async function main() {
     return;
   }
   if (issues.length) throw new Error(issues.join("\n"));
+  if (automatic) {
+    readPrivateJson(source);
+    console.log("[zeros-dev] Private Dev profile ready.");
+    return;
+  }
   if (injected) console.log("[zeros-dev] Cloud profile imported with mode 0600 into this checkout. Registry key preserved.");
   else {
     importDevelopmentProfile({ root, source });

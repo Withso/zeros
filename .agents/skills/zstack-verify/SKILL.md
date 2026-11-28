@@ -80,8 +80,8 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
   reports only the failing stage; capture the control-plane logs and the
   workspace row through the API before any cleanup.
 - After deploy, `pnpm alpha:probe` measures Alpha (`scripts/electron-cloud.mjs`).
-- Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
-  copy them into the checkout or into output.
+- Provider checks use the Zeros Internal MCP (`whoami`, then `check_*`);
+  never copy provider keys into a checkout or output.
 - Run a control-plane-generated VM script (runtime install, checkpoint,
   restore) on the real Boat image once: one throwaway VM from the Alpha Cloud
   Computer, no storage writes, deleted afterwards. Local tests run this host's

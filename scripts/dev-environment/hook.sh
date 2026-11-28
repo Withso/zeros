@@ -12,7 +12,7 @@ fi
 case "${1:-}" in
   setup)
     if [ -f scripts/dev-environment/setup.mjs ]; then
-      node scripts/dev-environment/setup.mjs --profile-only
+      node scripts/dev-environment/setup.mjs --checkout
     fi
     node scripts/dev-environment/dependencies.mjs --install ;;
   # Zeros Dev is headless; `backend` remains for older Conductor settings.
