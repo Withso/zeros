@@ -34,6 +34,9 @@ describe("design selection shortcuts", () => {
       ),
     ).toBe("copy");
     expect(
+      resolveDesignSelectionShortcut(shortcutEvent({ key: "x" }), false, true),
+    ).toBe("cut");
+    expect(
       resolveDesignSelectionShortcut(shortcutEvent({ key: "d" }), false, true),
     ).toBe("duplicate");
     expect(

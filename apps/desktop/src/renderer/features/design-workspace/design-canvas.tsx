@@ -6393,6 +6393,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     appearance: Promise<DesignRuntimeNodeDetails | null>;
     component: ReturnType<typeof captureDesignFrameComponentCopy>;
   } | null>(null);
+  const keyboardCopyRef = useRef<() => boolean>(() => false);
   /** Whether focus was last owned inside this visible surface, and whether a
    * panel control gained that focus by pointer rather than keyboard. */
   const designFocusOwnerRef = useRef(false);
@@ -6427,34 +6428,46 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const surfaceFocused =
         activeElement instanceof Element &&
         (activeElement.closest(DESIGN_SURFACE_SELECTOR) ||
-          (activeElement === document.body && designFocusOwnerRef.current));
+          activeElement === document.body);
       return !gestureCancelRef.current && !event.defaultPrevented &&
         !isEditableHotkeyTarget(event.target) && surfaceFocused &&
         !window.getSelection()?.toString();
     };
-    const copy = (event: ClipboardEvent) => {
-      if (!owns(event) || !event.clipboardData) return;
+    const captureCopy = () => {
       const view = designWorkspaceView(workspaceId);
       const frame = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(item => item.file === view.selectedFrame);
-      if (!frame || (!view.frameSelected && !view.selectedNodeId)) return;
+      if (!frame || (!view.frameSelected && !view.selectedNodeId)) return null;
       if (view.selectedTargets.length > 1 || view.selectedNodeIds.length > 1) {
-        toast.info("Copy one layer or frame at a time."); return;
+        toast.info("Copy one layer or frame at a time."); return null;
       }
       const nodeId = frame.kind === "text" ? null : view.selectedNodeId;
-      if (nodeId && isDesignComponentPartNodeId(nodeId)) return;
+      if (nodeId && isDesignComponentPartNodeId(nodeId)) return null;
       const component = nodeId ? null : captureDesignFrameComponentCopy(workspaceId, frame);
-      if (component?.identityUnknown) { toast.error("This frame's component identity is unavailable."); return; }
+      if (component?.identityUnknown) { toast.error("This frame's component identity is unavailable."); return null; }
       const runtime = designFrameRuntime(workspaceId, frame.file);
       const rootId = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid;
       const token = crypto.randomUUID();
-      clipboardRef.current = { token, frame, nodeId, component, owner: captureDesignPageOwner(workspaceId),
+      return { token, frame, nodeId, component, owner: captureDesignPageOwner(workspaceId),
         directoryRevision: view.directoryRevision,
         appearance: runtime?.sourceVersion === frame.sourceVersion
           ? runtime.getNodeDetails(nodeId ?? rootId ?? DESIGN_RUNTIME_DOCUMENT_BODY_ID, undefined, { relocation: true }).catch(() => null)
           : Promise.resolve(null) };
-      event.clipboardData.setData(mime, token);
-      event.clipboardData.setData("text/plain", `Zeros Design selection: ${token}`);
+    };
+    const copy = (event: ClipboardEvent) => {
+      if (!owns(event) || !event.clipboardData) return;
+      const clip = captureCopy();
+      if (!clip) return;
+      clipboardRef.current = clip;
+      event.clipboardData.setData(mime, clip.token);
+      event.clipboardData.setData("text/plain", `Zeros Design selection: ${clip.token}`);
       event.preventDefault();
+    };
+    keyboardCopyRef.current = () => {
+      const clip = captureCopy();
+      if (!clip) return false;
+      clipboardRef.current = clip;
+      void navigator.clipboard.writeText(`Zeros Design selection: ${clip.token}`).catch(() => {});
+      return true;
     };
     const paste = (event: ClipboardEvent) => {
       const clip = clipboardRef.current;
@@ -6510,7 +6523,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     };
     window.addEventListener("copy", copy);
     window.addEventListener("paste", paste);
-    return () => { window.removeEventListener("copy", copy); window.removeEventListener("paste", paste); };
+    return () => { keyboardCopyRef.current = () => false; window.removeEventListener("copy", copy); window.removeEventListener("paste", paste); };
   }, [active, workspaceId, folder, duplicateSelectedFrame, savedEditingSession]);
 
   // Canvas shortcuts are focus-scoped and attach only while the visible design
@@ -6567,6 +6580,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         activeElement instanceof Element &&
         (Boolean(activeElement.closest(DESIGN_SURFACE_SELECTOR)) ||
           (activeElement === document.body && designFocusOwnerRef.current));
+      // Frame surfaces can select without moving DOM focus out of BODY.
+      // Clipboard keys still belong to the visible selection when nothing else owns focus.
+      const designClipboardFocused =
+        activeElement instanceof Element &&
+        (Boolean(activeElement.closest(DESIGN_SURFACE_SELECTOR)) ||
+          activeElement === document.body);
       const shortcutView = designWorkspaceView(workspaceId);
       const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
       const selectedNodeIsTarget = Boolean(shortcutFrame && shortcutView.selectedNodeId);
@@ -6618,19 +6637,25 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const selectionShortcut = resolveDesignSelectionShortcut(
         event,
         editableTarget,
-        designSurfaceFocused && (selectedNodeIsTarget || selectedFrameIsTarget),
+        designClipboardFocused && (selectedNodeIsTarget || selectedFrameIsTarget),
       );
       if (selectionShortcut) {
         if (selectionShortcut === "copy") {
           if (window.getSelection()?.toString()) return;
-          // Claim the chord before the shell's copy-worktree-path fallback,
-          // then dispatch the native copy event while user activation is live.
+          // Claim the chord before the shell's copy-worktree-path fallback.
+          // Synthetic copy events do not reach the system clipboard here, so
+          // write the same token the native copy listener would write.
           event.preventDefault();
-          document.execCommand("copy");
+          keyboardCopyRef.current();
           return;
         }
         event.preventDefault();
-        if (selectionShortcut === "delete") {
+        if (selectionShortcut === "cut") {
+          if (keyboardCopyRef.current()) {
+            if (selectedNodeIsTarget) void deleteSelectedNode();
+            else if (shortcutFrame) void onDeleteFrame(shortcutFrame);
+          }
+        } else if (selectionShortcut === "delete") {
           if (selectedNodeIsTarget) void deleteSelectedNode();
           else if (shortcutFrame) void deleteSelectedFrame(shortcutFrame);
         } else {

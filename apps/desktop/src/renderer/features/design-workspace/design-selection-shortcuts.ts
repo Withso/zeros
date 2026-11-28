@@ -1,4 +1,4 @@
-export type DesignSelectionShortcut = "copy" | "duplicate" | "delete";
+export type DesignSelectionShortcut = "copy" | "cut" | "duplicate" | "delete";
 
 export interface DesignSelectionShortcutEvent {
   key: string;
@@ -32,6 +32,7 @@ export function resolveDesignSelectionShortcut(
 
   const key = event.key.toLocaleLowerCase();
   if ((event.metaKey || event.ctrlKey) && key === "c") return "copy";
+  if ((event.metaKey || event.ctrlKey) && key === "x") return "cut";
   if ((event.metaKey || event.ctrlKey) && key === "d") return "duplicate";
   if (
     !event.metaKey &&
