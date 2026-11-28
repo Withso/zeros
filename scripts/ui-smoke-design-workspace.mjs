@@ -1,6 +1,6 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
-import { addDesignSection, designCanvasPoint, designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, designCanvasPoint, designFrameElementBox, openLayersDrawer, waitForDesignInspectorSelection } from "./ui-smoke-design-helpers.mjs";
 import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
@@ -5104,6 +5104,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-multi-select",
     ),
   );
+  await waitForDesignInspectorSelection(page);
   check(
     "multi-selection is explicit in the inspector",
     await page.locator("[data-design-inspector-header]").getByText("2 layers", { exact: true }).isVisible(),

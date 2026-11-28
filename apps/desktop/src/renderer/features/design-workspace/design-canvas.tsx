@@ -255,7 +255,7 @@ import {
   publishDesignLayoutToolsLive,
   releaseDesignLayoutToolsLive,
 } from "./state/design-layout-tools-live";
-import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
 import { cancelDesignFrameIntentDwell, clearDesignFrameIntent, noteDesignFrameIntent, noteDesignPointerMoved, primeDesignFrameIntent,
   useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
@@ -1992,6 +1992,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     };
   }, [active, revealAgentTarget, zoomActionsRef, zoomAt]);
 
+  /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
+   * Drawn geometry is authored in that same mutation, so no default-size frame
+   * can flash before a second resize write. The new frame's editor boots at
+   * once and the frame is selected when it reports (bounded), so the
+   * inspector moves straight to its full properties; the drawn rectangle
+   * covers the canvas until the frame paints. */
   const createFrame = useCallback(
     async (geometry?: DesignFrameGeometryWire, title?: string, fitCreated = false) => {
       if (!workspaceId || creatingFrameRef.current) return null;
@@ -2023,11 +2029,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       if (!created) return null;
       const frame = created;
-      if (canvasLifetimeRef.current === lifetime && designSelectionUnchangedSince(workspaceId, selectionBefore)) {
-        if (!geometry || fitCreated) fitFrames([frame]);
-        primeDesignFrameIntent(workspaceId, frame.file);
+      if (canvasLifetimeRef.current !== lifetime || !designSelectionUnchangedSince(workspaceId, selectionBefore)) return frame;
+      if (!geometry || fitCreated) fitFrames([frame]);
+      primeDesignFrameIntent(workspaceId, frame.file);
+      void waitForDesignRuntimeFrame(workspaceId, frame.file, frame.sourceVersion, 1_000).then(() => {
+        if (canvasLifetimeRef.current !== lifetime || (canvasPageOwner && !isCurrentDesignPageOwner(canvasPageOwner))) return;
+        // Any selection the person made meanwhile wins over the creation's,
+        // including choosing the same target again or clearing it.
+        if (!designSelectionUnchangedSince(workspaceId, selectionBefore)) return;
         publishSelection(frame, { selected: true, reveal: true });
-      }
+      });
       return frame;
     },
     [fitFrames, publishSelection, workspaceId, canvasPageOwner],
