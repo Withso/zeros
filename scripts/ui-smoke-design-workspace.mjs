@@ -1191,6 +1191,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     await waitFor(async () => (await zoomLabel()) !== "200%", `design-zoom-${item}`);
     const fromMenu = await settledCanvasTransform();
     const same =
+      fromMenu !== null &&
+      fromShortcut !== null &&
       Math.abs(fromMenu.zoom - fromShortcut.zoom) < 0.001 &&
       Math.abs(fromMenu.panX - fromShortcut.panX) <= 1 &&
       Math.abs(fromMenu.panY - fromShortcut.panY) <= 1;
@@ -1198,13 +1200,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   };
   const settledCanvasTransform = async () => {
     let previous = null;
-    await waitFor(async () => {
+    const settled = await waitFor(async () => {
       const current = await readCanvasTransform();
       const settled = previous !== null && JSON.stringify(current) === JSON.stringify(previous);
       previous = current;
       return settled;
     }, "design-zoom-camera-settled");
-    return previous;
+    return settled ? previous : null;
   };
   const [selectionMatches, selectionDetail] = await menuFitMatchesShortcut("Zoom to selection", "Shift+2");
   check("Zoom to selection frames what Shift+2 frames", selectionMatches, selectionDetail);
