@@ -304,7 +304,8 @@ describe("chat selection popup", { timeout: 15_000 }, () => {
       await expect.poll(() => actions(page).count()).toBe(0);
       await page.keyboard.press("ControlOrMeta+l");
       expect(await calls(page)).toEqual([]);
-      await select(page, "#p2", "#p2");
+      // Starting inside the existing HTML selection drags that selection in Chromium instead of making a new one; choose different text.
+      await select(page, "#p1", "#p1");
       await expect.poll(() => actions(page).isVisible()).toBe(true);
     } finally { await page.close(); }
   });
