@@ -134,6 +134,18 @@ describe("GitHub credential store", () => {
     expect(await h.store.get("github-app")).toMatchObject({ accessToken: "app-a", login: "alice", githubUserId: "111" });
   });
 
+  it("does not return a login-only token that was removed while it was being verified", async () => {
+    let resume!: (value: { githubUserId: string; login: string }) => void;
+    const verifyIdentity = vi.fn(() => new Promise<{ githubUserId: string; login: string }>(resolve => { resume = resolve; }));
+    const h = harness({ selected: "pat", verifyIdentity });
+    h.secrets.set(GITHUB_PAT_ACCOUNT, JSON.stringify({ ...gitIdentity, method: "pat", accessToken: "old", login: "old-name" }));
+    const read = h.store.getSelectedCredential();
+    await vi.waitFor(() => expect(verifyIdentity).toHaveBeenCalledOnce());
+    h.secrets.delete(GITHUB_PAT_ACCOUNT);
+    resume({ githubUserId: "123", login: "old-name" });
+    expect(await read).toBeNull();
+  });
+
   it("rejects a competing identity that arrives during verification", async () => {
     let resume!: (value: { githubUserId: string; login: string }) => void;
     const verifyIdentity = vi.fn(() => new Promise<{ githubUserId: string; login: string }>(resolve => { resume = resolve; }));
