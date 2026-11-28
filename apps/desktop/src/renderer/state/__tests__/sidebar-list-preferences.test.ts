@@ -129,10 +129,10 @@ describe("sidebar view preferences", () => {
   it("defaults to the neutral view and restores changes on reload", async () => {
     const prefs = await import("../sidebar-list-preferences");
     expect(prefs.getSidebarListPreferences().view).toEqual(prefs.SIDEBAR_VIEW_DEFAULTS);
-    prefs.setSidebarView({ compact: true, statuses: ["input"], direction: "asc" });
+    prefs.setSidebarView({ compact: true, statuses: ["needs-you"], direction: "asc" });
     resetSidebarListPreferencesForTests();
     const { view } = prefs.getSidebarListPreferences();
-    expect([view.compact, view.statuses, view.direction]).toEqual([true, ["input"], "asc"]);
+    expect([view.compact, view.statuses, view.direction]).toEqual([true, ["needs-you"], "asc"]);
   });
 
   it("drops unknown or malformed values from storage", async () => {
@@ -142,9 +142,44 @@ describe("sidebar view preferences", () => {
     const { view, sort } = prefs.getSidebarListPreferences();
     expect(sort).toBe("updated");
     expect(view.compact).toBe(false);
-    expect(view.statuses).toEqual(["input"]);
+    expect(view.statuses).toEqual(["needs-you"]);
     expect(view.grouping).toBeNull();
     expect(view.collapsedSections).toEqual(["pinned"]);
+  });
+
+  it("folds the five earlier status filters into Needs you, Working and Idle", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    values.set(KEY, JSON.stringify({ view: { statuses: ["failed", "unread", "input", "idle", "working"] } }));
+    resetSidebarListPreferencesForTests();
+    expect(prefs.getSidebarListPreferences().view.statuses).toEqual(["needs-you", "working", "idle"]);
+    values.set(KEY, JSON.stringify({ view: { statuses: ["unread"] } }));
+    resetSidebarListPreferencesForTests();
+    expect(prefs.getSidebarListPreferences().view.statuses).toEqual(["needs-you"]);
+  });
+
+  it("keeps each grouping's group order and hidden groups, bounded and validated", async () => {
+    const prefs = await import("../sidebar-list-preferences");
+    prefs.setSidebarGroupOrder("status", ["working", "needs-you"]);
+    prefs.setSidebarGroupHidden("status", "archived", true);
+    prefs.setSidebarGroupHidden("pr", "closed", true);
+    resetSidebarListPreferencesForTests();
+    let { view } = prefs.getSidebarListPreferences();
+    expect(view.groupOrder).toEqual({ status: ["working", "needs-you"] });
+    expect(view.hiddenGroups).toEqual({ status: ["archived"], pr: ["closed"] });
+    prefs.setSidebarGroupHidden("status", "archived", false);
+    expect(prefs.getSidebarListPreferences().view.hiddenGroups).toEqual({ pr: ["closed"] });
+    // A filtered menu reorders only the groups it lists; the others keep
+    // their stored places instead of being dropped from the order.
+    prefs.setSidebarGroupOrder("repository", ["a", "b", "c", "d"]);
+    prefs.setSidebarGroupOrder("repository", ["d", "b"]);
+    expect(prefs.getSidebarListPreferences().view.groupOrder.repository).toEqual(["a", "d", "c", "b"]);
+    prefs.setSidebarGroupOrder("repository", ["e", "a"]);
+    expect(prefs.getSidebarListPreferences().view.groupOrder.repository).toEqual(["e", "d", "c", "b", "a"]);
+    values.set(KEY, JSON.stringify({ view: { groupOrder: { status: ["a", 4, "", "a"], bogus: ["x"] }, hiddenGroups: "no" } }));
+    resetSidebarListPreferencesForTests();
+    ({ view } = prefs.getSidebarListPreferences());
+    expect(view.groupOrder).toEqual({ status: ["a"] });
+    expect(view.hiddenGroups).toEqual({});
   });
 
   it("reads a store written before the view existed", async () => {

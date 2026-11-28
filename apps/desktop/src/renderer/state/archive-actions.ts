@@ -145,9 +145,18 @@ function pickRepointTarget(leaving: Workspace): {
   );
   const filterOwner = sidebarRepositoryFilterOwner(getTeamStoreState().me?.user.id, organizationId);
   const hidden = localWorkShowsEverywhere() ? sidebarHiddenPlacements(filterOwner) : [];
+  const filter = sidebarWorkspaceListFilter(state.workspaceListFilter);
+  const preferences = getSidebarListPreferences();
+  // Under Group › Repository the sidebar orders and hides repositories from
+  // the Group menu; follow it so removal never lands in a hidden repository.
+  // The departing row stays as the anchor even when its own group is hidden.
+  const repositoryGroups = (preferences.view.grouping ?? (filter === "grouped" ? "repository" : null)) === "repository"
+    ? { groupOrder: preferences.view.groupOrder.repository, hiddenGroups: preferences.view.hiddenGroups.repository, keepWorkspaceId: leaving.id }
+    : {};
   const entries = buildSidebarWorkspaceEntries({
-    filter: sidebarWorkspaceListFilter(state.workspaceListFilter),
-    sort: getSidebarListPreferences().sort,
+    filter,
+    sort: preferences.sort,
+    ...repositoryGroups,
     repositoryIds: sidebarRepositoryIds(filterOwner),
     workspaces: rowsShownForPlacements(cached, hidden),
     pending: rowsShownForPlacements(pending, hidden),

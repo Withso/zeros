@@ -163,6 +163,7 @@ import {
   designLayoutResizedFrame,
   isDesignLayoutChildAction,
 } from "./design-layout-children";
+import { designLayoutSelectionUpdates } from "./design-layout-selection";
 import {
   designLayoutActionStyles,
   designLayoutActionForConfirmedDetails,
@@ -3133,6 +3134,12 @@ export const DesignInspector = React.memo(function DesignInspector({
         assertFrameCurrent();
         let updates: Map<string, Record<string, string | null>>;
         if (
+          (action.type === "align" || action.type === "distribute") &&
+          action.target === "self" &&
+          details.length > 1
+        ) {
+          updates = designLayoutSelectionUpdates(details, action);
+        } else if (
           isDesignLayoutChildAction(action) ||
           action.type === "auto-layout"
         ) {
@@ -3938,7 +3945,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
-        <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
+        <Button type="button" variant="secondary" size="compact" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
           <ExternalLink /> Open preview
         </Button>
         <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
@@ -3955,6 +3962,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           <Button
             type="button"
             variant="secondary"
+            size="compact"
             className="w-full"
             disabled={frameAction !== null}
             aria-label="Export PNG"

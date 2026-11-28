@@ -718,7 +718,7 @@
           "section": "light-red-text",
           "utility": "--color-accent-bg-hover",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 104
+          "utilityOrder": 105
         }
       }
     },
@@ -732,7 +732,7 @@
           "section": "light-red-text",
           "utility": "--color-green-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 105
+          "utilityOrder": 106
         }
       }
     },
@@ -746,7 +746,7 @@
           "section": "light-red-text",
           "utility": "--color-accent-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 108
+          "utilityOrder": 109
         }
       }
     },
@@ -760,7 +760,7 @@
           "section": "light-red-text",
           "utility": "--color-neutral-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 111
+          "utilityOrder": 112
         }
       }
     },
@@ -838,7 +838,7 @@
           "section": "light-red-text",
           "utility": "--color-conflict-neutral",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 114
+          "utilityOrder": 115
         }
       }
     },
@@ -856,6 +856,23 @@
           "utility": "--color-violet-text",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 42
+        }
+      }
+    },
+    "orange-text": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [24.46, 73.034, 34.902]
+      },
+      "$description": "orange status words and dots for work waiting on the user (needs input, plan ready) on any plain surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--orange-text",
+          "section": "light-red-text",
+          "utility": "--color-orange-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 45
         }
       }
     },
@@ -906,7 +923,7 @@
           "section": "light-red-text",
           "utility": "--color-accent",
           "utilitySection": "utilities-red-text",
-          "utilityOrder": 45
+          "utilityOrder": 46
         }
       }
     },

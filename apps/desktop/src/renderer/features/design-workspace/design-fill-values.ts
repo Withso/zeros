@@ -1,12 +1,15 @@
+import { parseDesignColor } from "./design-color-values";
 export type DesignFillType = "solid" | "gradient" | "image";
 
 export interface DesignGradientValue {
   type: "linear" | "radial" | "conic";
-  angle: number;
+  angle: number | string;
   start: string;
   end: string;
   startPosition?: string;
   endPosition?: string;
+  startPositionAuthored?: boolean;
+  endPositionAuthored?: boolean;
   repeating?: boolean;
 }
 
@@ -75,7 +78,7 @@ function splitTopLevel(value: string): string[] | null {
 }
 
 const STOP_POSITION =
-  /^(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:%|px|r?em|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pt|pc)?|(?:calc|min|max|clamp)\(.+\))$/i;
+  /^(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:%|px|r?em|vw|vh|vmin|vmax|ch|ex|cm|mm|in|pt|pc)?|(?:calc|min|max|clamp|var)\(.+\))$/i;
 
 function lastTopLevelWhitespace(value: string): number {
   let depth = 0;
@@ -95,13 +98,21 @@ function lastTopLevelWhitespace(value: string): number {
   return splitAt;
 }
 
+function stripCssComments(value: string): string {
+  return value.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
 function parseStop(
   value: string,
   fallbackPosition: string,
-): { color: string; position: string } | null {
+): { color: string; position: string; positionAuthored: boolean } | null {
   const splitAt = lastTopLevelWhitespace(value);
   const possiblePosition = splitAt >= 0 ? value.slice(splitAt).trim() : "";
-  const hasPosition = STOP_POSITION.test(possiblePosition);
+  // A trailing var() can be a position only when a real color precedes it;
+  // comments alone must not turn the gradient's color token into a position.
+  const hasPosition =
+    STOP_POSITION.test(possiblePosition) &&
+    stripCssComments(splitAt >= 0 ? value.slice(0, splitAt) : "").trim() !== "";
   const color = (hasPosition ? value.slice(0, splitAt) : value).trim();
   if (hasPosition) {
     const previousSplit = lastTopLevelWhitespace(color);
@@ -116,6 +127,7 @@ function parseStop(
   return {
     color,
     position: hasPosition ? possiblePosition : fallbackPosition,
+    positionAuthored: hasPosition,
   };
 }
 
@@ -134,28 +146,48 @@ const LINEAR_DIRECTIONS: Readonly<Record<string, number>> = {
   "to left top": 315,
 };
 
-function linearAngle(value: string): number | null {
-  const source = value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
-  if (Object.hasOwn(LINEAR_DIRECTIONS, source)) {
-    return LINEAR_DIRECTIONS[source]!;
-  }
-  const match = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/.exec(source);
+function angleToken(value: string): string | null {
+  const source = value.trim();
+  return /^var\(\s*--[\w-]+(?:\s*,[\s\S]*)?\)$/i.test(source) ? source : null;
+}
+
+function numericAngle(value: string): number | null {
+  const match = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/.exec(value);
   if (!match?.[1]) return null;
   const angle = Number(match[1]);
   return Number.isFinite(angle) ? angle : null;
 }
 
-/** Parse only gradients this two-stop editor can round-trip faithfully. */
-export function parseDesignGradient(value: string): DesignGradientValue | null {
+function linearAngle(value: string): number | string | null {
+  const token = angleToken(value);
+  if (token) return token;
+  const source = value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+  if (Object.hasOwn(LINEAR_DIRECTIONS, source)) {
+    return LINEAR_DIRECTIONS[source]!;
+  }
+  return numericAngle(source);
+}
+
+function gradientInput(value: string) {
   const match = /^(repeating-)?(linear|radial|conic)-gradient\((.*)\)$/is.exec(
     value.trim(),
   );
   if (!match?.[2] || match[3] === undefined) return null;
-  const type = match[2].toLocaleLowerCase() as DesignGradientValue["type"];
-  const parts = splitTopLevel(match[3]);
+  return {
+    type: match[2].toLocaleLowerCase() as DesignGradientValue["type"],
+    parts: splitTopLevel(match[3]),
+    repeating: Boolean(match[1]),
+  };
+}
+
+/** Parse only gradients this two-stop editor can round-trip faithfully. */
+export function parseDesignGradient(value: string): DesignGradientValue | null {
+  const input = gradientInput(value);
+  if (!input) return null;
+  const { type, parts } = input;
   if (!parts || parts.length < 2 || parts.length > 3) return null;
 
-  let angle = type === "linear" ? 180 : 0;
+  let angle: number | string = type === "linear" ? 180 : 0;
   if (parts.length === 3) {
     const prelude = parts.shift()!;
     if (/^in\s+/i.test(prelude)) return null;
@@ -166,12 +198,12 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     } else if (type === "radial") {
       if (prelude.trim().toLocaleLowerCase() !== "circle") return null;
     } else {
-      const conic = /^from\s+([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg$/i.exec(
-        prelude.trim(),
-      );
+      const conic = /^from\s+([\s\S]+)$/i.exec(prelude.trim());
       if (!conic?.[1]) return null;
-      angle = Number(conic[1]);
-      if (!Number.isFinite(angle)) return null;
+      const parsed =
+        angleToken(conic[1]) ?? numericAngle(conic[1].toLocaleLowerCase());
+      if (parsed === null) return null;
+      angle = parsed;
     }
   }
 
@@ -185,8 +217,77 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     end: end.color,
     startPosition: start.position,
     endPosition: end.position,
-    repeating: Boolean(match[1]),
+    startPositionAuthored: start.positionAuthored,
+    endPositionAuthored: end.positionAuthored,
+    repeating: input.repeating,
   };
+}
+
+/** A var() first argument is ambiguous CSS: it can be the angle of a
+ * two-stop gradient or the first color of an unsupported three-stop gradient.
+ * The resolved paint tells those apart because the latter has three stops. */
+export function parseEditableDesignGradient(
+  value: string,
+  resolvedValue: string,
+): DesignGradientValue | null {
+  const parsed = parseDesignGradient(value);
+  if (!parsed) return null;
+  const resolvedInput = gradientInput(resolvedValue);
+  const resolvedPrelude = resolvedInput?.parts?.[0] ?? "";
+  if (
+    typeof parsed.angle === "string" &&
+    (/\s+in\s+(?:oklab|oklch|lab|lch|hsl|hwb|xyz|srgb)/i.test(resolvedPrelude) ||
+      (parsed.type === "conic" && /\s+at\s+/i.test(resolvedPrelude)))
+  )
+    return null;
+  const resolved = parseDesignGradient(resolvedValue);
+  if (!resolved) {
+    // A position token may itself be a range, which the resolved CSS expands
+    // into extra stops. That shape round-trips through the token, so only
+    // hidden color-stop data or hidden conic geometry remains unsafe.
+    if (
+      parsed.type === "conic" &&
+      /^conic-gradient\(\s*from\s+[^,]+\s+at\s+/i.test(resolvedValue.trim())
+    )
+      return null;
+    if (
+      [parsed.start, parsed.end].some((color) =>
+        color.toLocaleLowerCase().includes("var("),
+      )
+    )
+      return null;
+    const start = parseDesignColor(parsed.start);
+    const parts = resolvedInput?.parts ?? [];
+    const firstIsPrelude = Boolean(
+      parts.length > 2 &&
+        ((parsed.type === "linear" && linearAngle(parts[0]!) !== null) ||
+          (parsed.type === "conic" && /^from\s+/i.test(parts[0]!)) ||
+          (parsed.type === "radial" && !parseDesignColor(parts[0]!))),
+    );
+    const firstStopPart = parts[firstIsPrelude ? 1 : 0];
+    const firstStop = parseDesignColor(
+      firstStopPart ? (parseStop(firstStopPart, "0%")?.color ?? "") : "",
+    );
+    return firstStop &&
+      start &&
+      firstStop.r === start.r &&
+      firstStop.g === start.g &&
+      firstStop.b === start.b &&
+      Math.abs(firstStop.a - start.a) < 0.01
+      ? parsed
+      : null;
+  }
+  for (const key of ["start", "end"] as const) {
+    const position = parsed[`${key}Position`];
+    const tokenColor = parsed[key].toLocaleLowerCase().includes("var(");
+    if (
+      tokenColor &&
+      parsed[`${key}PositionAuthored`] === false &&
+      position !== resolved[`${key}Position`]
+    )
+      return null;
+  }
+  return parsed;
 }
 
 function number(value: number): string {
@@ -196,18 +297,23 @@ function number(value: number): string {
 export function formatDesignGradient(gradient: DesignGradientValue): string {
   const prefix = gradient.repeating ? "repeating-" : "";
   const colors = `${gradient.start} ${gradient.startPosition ?? "0%"}, ${gradient.end} ${gradient.endPosition ?? "100%"}`;
-  const angle = Number.isFinite(gradient.angle)
-    ? gradient.angle
-    : gradient.type === "linear"
-      ? DEFAULT_DESIGN_GRADIENT.angle
-      : 0;
+  const numeric =
+    typeof gradient.angle === "number" && Number.isFinite(gradient.angle)
+      ? gradient.angle
+      : gradient.type === "linear"
+        ? 180
+        : 0;
+  const angle =
+    typeof gradient.angle === "string" && gradient.angle.trim()
+      ? gradient.angle.trim()
+      : `${number(numeric)}deg`;
   if (gradient.type === "radial") {
     return `${prefix}radial-gradient(circle, ${colors})`;
   }
   if (gradient.type === "conic") {
-    return `${prefix}conic-gradient(from ${number(angle)}deg, ${colors})`;
+    return `${prefix}conic-gradient(from ${angle}, ${colors})`;
   }
-  return `${prefix}linear-gradient(${number(angle)}deg, ${colors})`;
+  return `${prefix}linear-gradient(${angle}, ${colors})`;
 }
 
 export function readDesignImageUrl(value: string): string {

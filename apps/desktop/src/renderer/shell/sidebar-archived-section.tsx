@@ -1,8 +1,9 @@
-// "Show archived": the owner's archived workspaces under the live sections,
-// read from the same keyed archive list as Home. Mounted only while the switch
-// is on, so the archive request never runs for users who keep it off.
+// The owner's archived workspaces, read from the same keyed archive list as
+// Home: a section under the live ones with View › Show archived, or Group ›
+// Status's last group. Mounted only while one of those shows it, so the archive
+// request never runs for users who keep both off.
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { formatCompactAge } from "../features/agent/format-age";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { restoreWorkspaceWithFeedback } from "../state/archive-actions";
@@ -10,25 +11,26 @@ import { useArchivedWorkspaces } from "../state/use-projects";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { cn } from "../shared/ui/cn";
 import { ZerosSpinner } from "../shared/ui/loading";
-import { Button } from "../shared/ui/primitives/button";
 import { IconButton } from "../shared/ui/primitives/icon-button";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { workspaceLabel } from "./workspace-tabs";
+import { SidebarGroupHeader } from "./sidebar-group-header";
 
 const ARCHIVED_LIMIT = 20;
 
 export function SidebarArchivedSection({
+  variant,
   organization,
   collapsed,
   compact,
   onToggle,
-  labelClassName,
 }: {
+  /** A section after the live ones, or the last group inside My workspaces. */
+  variant: "section" | "group";
   organization: Parameters<typeof filterRowsForOrganization>[1];
   collapsed: boolean;
   compact: boolean;
   onToggle: (collapsed: boolean) => void;
-  labelClassName: string;
 }) {
   const { workspaces, resolved } = useArchivedWorkspaces();
   const openWorkspace = useOpenWorkspace();
@@ -40,22 +42,24 @@ export function SidebarArchivedSection({
       .slice(0, ARCHIVED_LIMIT),
     [organization, workspaces],
   );
+  // Group › Status drops empty groups; Archived is one of them. The section
+  // stays, since the user turned View › Show archived on to see it.
+  if (variant === "group" && resolved && rows.length === 0) return null;
   const now = Date.now();
+  const listId = variant === "section" ? "sidebar-section-archived" : "sidebar-group-archived";
   return (
     <>
-      <div className="group/section flex h-8 shrink-0 items-center gap-1 pt-1" data-sidebar-section="archived">
-        <Button type="button" variant="ghost"
-          className="hover:bg-transparent h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
-          aria-expanded={!collapsed} aria-controls="sidebar-section-archived"
-          onClick={() => onToggle(!collapsed)}>
-          <span className={cn(labelClassName, "min-w-0")}>Archived</span>
-          {resolved && <span className="text-fg3 text-3xxs tabular-nums">{rows.length}</span>}
-          <span className="ml-auto inline-flex shrink-0" aria-hidden="true">
-            {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
-          </span>
-        </Button>
-      </div>
-      <div id="sidebar-section-archived" role="group" aria-label="Archived workspaces" className="flex flex-col gap-0.5 empty:hidden">
+      <SidebarGroupHeader
+        level={variant}
+        label="Archived"
+        count={resolved ? rows.length : undefined}
+        expanded={!collapsed}
+        controls={listId}
+        onToggle={() => onToggle(!collapsed)}
+        className={variant === "section" ? "mt-1" : undefined}
+        {...(variant === "section" ? { "data-sidebar-section": "archived" } : { "data-sidebar-group": "group:archived" })}
+      />
+      <div id={listId} role="group" aria-label="Archived workspaces" className="flex flex-col gap-0.5 empty:hidden">
         {!collapsed && rows.map((workspace) => {
           const label = workspaceLabel(workspace);
           const busy = restoring.has(workspace.id);
@@ -74,7 +78,7 @@ export function SidebarArchivedSection({
           };
           return (
             <div key={workspace.id} data-sidebar-archived={workspace.id}
-              className={cn("group/archived text-fg3 flex min-w-0 items-center gap-2 rounded-md pr-1 pl-2 text-xs hover:bg-(--surface-hover)", compact ? "h-8" : "h-9")}>
+              className={cn("group/archived text-fg3 flex min-w-0 items-center gap-2 rounded-md pr-1 text-xs hover:bg-(--surface-hover)", variant === "group" ? "pl-8" : "pl-2", compact ? "h-8" : "h-9")}>
               <span className="min-w-0 flex-1 truncate">{label}</span>
               {workspace.archivedAt != null && (
                 <span className="text-fg3 text-3xxs shrink-0 tabular-nums group-hover/archived:hidden group-focus-within/archived:hidden">

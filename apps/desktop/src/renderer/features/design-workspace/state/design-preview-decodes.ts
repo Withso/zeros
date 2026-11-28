@@ -40,6 +40,7 @@ export class DesignPreviewDecodes {
   private token: object | null = null;
   private owner: string | null = null;
   private warmBytes = 0;
+  private nextExpiryAt = Infinity;
 
   constructor(private readonly deps: {
     acquire(target: DesignPreviewTarget, accept?: (picture: DesignPreviewPicture) => boolean): DesignPreviewPictureLease | null;
@@ -75,8 +76,8 @@ export class DesignPreviewDecodes {
   }
 
   private acquireImage(target: DesignPreviewTarget, readyOnly: boolean): DesignDecodedPreviewLease | null {
-    for (const entry of this.entries.values())
-      if (!entry.users && this.now() - entry.touched >= IDLE_MS) this.remove(entry);
+    const now = this.now();
+    if (now >= this.nextExpiryAt) this.expireIdle(now);
     let display = this.deps.acquire(target, readyOnly ? picture => !!this.entries.get(picture.key)?.image : undefined);
     if (!display && !readyOnly && this.deps.hasPicture(target)) {
       // The picture pool can have a tighter local cap than the shared budget.
@@ -134,6 +135,7 @@ export class DesignPreviewDecodes {
         // Within either priority, evict the least recently displayed first.
         this.entries.delete(owned.picture.key);
         this.entries.set(owned.picture.key, owned);
+        this.nextExpiryAt = Math.min(this.nextExpiryAt, owned.touched + IDLE_MS);
         if (this.warmBytes > this.maxWarmBytes) {
           const small = (entry: Entry) => Number(entry.picture.level === "mini" || entry.picture.level === "thumbnail");
           const victims = [...this.entries.values()].filter(candidate => !candidate.users).sort((a, b) => small(a) - small(b));
@@ -159,6 +161,15 @@ export class DesignPreviewDecodes {
     return { entries: this.entries.size, warmBytes: this.warmBytes,
       users: [...this.entries.values()].reduce((sum, entry) => sum + entry.users, 0),
       pending: [...this.entries.values()].filter(entry => !entry.image).length };
+  }
+
+  private expireIdle(now: number): void {
+    this.nextExpiryAt = Infinity;
+    for (const entry of [...this.entries.values()]) {
+      if (entry.users) continue;
+      if (now - entry.touched >= IDLE_MS) this.remove(entry);
+      else this.nextExpiryAt = Math.min(this.nextExpiryAt, entry.touched + IDLE_MS);
+    }
   }
 
   private remove(entry: Entry): void {

@@ -180,6 +180,24 @@ export function startChatUnreadTracking(): () => void {
   };
 }
 
+/** The chat to land on when a workspace opens with finished, unread work:
+ *  its most recently touched live chat that is unread, so opening the
+ *  workspace reads it and clears the row's Done. Null when none is unread. */
+export function newestUnreadChatInFolder(
+  chats: readonly { id: string; folder?: string | null; archived?: boolean; updatedAt?: number }[],
+  folder: string | null,
+): string | null {
+  if (!folder) return null;
+  const unread = current();
+  if (unread.size === 0) return null;
+  let best: { id: string; updatedAt?: number } | null = null;
+  for (const chat of chats) {
+    if (chat.archived || chat.folder !== folder || !unread.has(chat.id)) continue;
+    if (!best || (chat.updatedAt ?? 0) > (best.updatedAt ?? 0)) best = chat;
+  }
+  return best?.id ?? null;
+}
+
 /** Whether one chat is unread. A primitive, so tabs re-render only when it
  *  flips. */
 export function useChatUnread(chatId: string | null | undefined): boolean {

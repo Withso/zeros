@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import { useAgentSessions } from "../features/agent/sessions-hooks";
+import { newestUnreadChatInFolder } from "../features/agent/chat-unread";
 import { spawnDefaultChatForWorkspace } from "./spawn-default-chat";
 import {
   selectChatToRestoreForFolder,
@@ -75,11 +76,12 @@ export function useOpenWorkspace(): (
         if (cloudComputerV2 && options?.wake !== false && isCloudWorkspace(workspace.path) && hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
         return;
       }
-      // Last-viewed chat there (validated), else the most-recent live one.
-      const fallbackId = selectChatToRestoreForFolder(
-        useWorkspaceStore.getState(),
-        workspace.path,
-      );
+      // A chat that finished unread there, so opening reads it; else the
+      // last-viewed chat (validated), else the most-recent live one.
+      const state = useWorkspaceStore.getState();
+      const fallbackId =
+        (historyOnly ? null : newestUnreadChatInFolder(state.chats, workspace.path)) ??
+        selectChatToRestoreForFolder(state, workspace.path);
       const bridge = getActiveBridge();
       const chatHydrationPending = !fallbackId && (
         useWorkspaceStore.getState().pendingChatHydrationFolder === workspace.path ||

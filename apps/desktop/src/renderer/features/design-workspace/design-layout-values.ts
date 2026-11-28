@@ -52,7 +52,7 @@ export type DesignLayoutAction =
       value: "start" | "center" | "end";
       target?: DesignLayoutActionTarget;
     }
-  | { type: "distribute"; axis: DesignLayoutAxis }
+  | { type: "distribute"; axis: DesignLayoutAxis; target?: DesignLayoutActionTarget }
   | { type: "resize-fit" }
   | { type: "resize-fill" }
   /** With `by`, `value` is an amount from each layer's own position or

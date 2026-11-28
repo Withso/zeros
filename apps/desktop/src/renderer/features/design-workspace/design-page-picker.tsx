@@ -96,7 +96,7 @@ export function DesignPagePicker({
       focused.blur();
     useDesignWorkspaceUiStore
       .getState()
-      .setActivePage(workspaceId, id, directoryId);
+      .setActivePage(workspaceId, id, directoryId, { user: true });
   };
   const create = async () => {
     if (submitting.current || !active) return;

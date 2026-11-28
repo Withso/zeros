@@ -1,0 +1,9 @@
+{
+  "id": "design-gradient-angle-preserves-token-stops",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1340",
+  "symptom": "Changing only a gradient angle rewrote var(--token) colour stops as browser-resolved RGB literals, detaching the gradient from theme tokens.",
+  "rule": "Edit round-trippable authored gradients rather than their computed paint, while keeping the resolved paint for display. Token-valued stops are not editable as ordinary colours until token stop authoring exists.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-fill-destructive-edits.test.ts -t 'preserves var() gradient stops when only the angle changes'"
+}

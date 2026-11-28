@@ -134,6 +134,57 @@ export async function runDraftIndicatorsSmoke({
     );
   }
 
+  // A sidebar row's pencil follows its title and the name truncates before
+  // it; the hover archive action takes line 1's right end.
+  async function verifyWorkspacePencil(owner, theme) {
+    await moveAway();
+    const pencil = mark(owner);
+    const action = owner.getByRole("button", { name: /^Archive workspace/ });
+    const tabBefore = await owner.boundingBox();
+    const geometry = await pencil.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      const icon = node.querySelector("svg").getBoundingClientRect();
+      const tab = node.closest("[data-workspace-tab]").getBoundingClientRect();
+      const name = node
+        .closest("[data-sidebar-draft-mark]")
+        .parentElement.querySelector(":scope > span.truncate")
+        .getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        iconWidth: icon.width,
+        iconHeight: icon.height,
+        contained: rect.left >= tab.left && rect.right <= tab.right,
+        afterTitle: rect.left >= name.right - 0.5 && rect.left - name.right <= 8.5,
+      };
+    });
+    expect(geometry).toEqual({
+      width: 12,
+      height: 12,
+      iconWidth: 12,
+      iconHeight: 12,
+      contained: true,
+      afterTitle: true,
+    });
+    // Hover lays Archive over line 1's right end; with a long title that end
+    // includes the pencil, and Archive takes the pointer there.
+    await owner.hover();
+    await expect(action).toBeVisible();
+    expect(
+      await action.evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return top === node || node.contains(top);
+      }),
+    ).toBe(true);
+    expect(await owner.boundingBox()).toEqual(tabBefore);
+    await moveAway();
+    check(
+      `${theme}: a workspace's 12 × 12 pencil follows its title and hover archive keeps the row's size`,
+      true,
+    );
+  }
+
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => {
       document.documentElement.dataset.theme = theme;
@@ -150,7 +201,7 @@ export async function runDraftIndicatorsSmoke({
     await page.evaluate((theme) => {
       document.documentElement.dataset.theme = theme;
     }, theme);
-    await verifySlot(workspace("a"), /^Archive workspace/, 220, theme);
+    await verifyWorkspacePencil(workspace("a"), theme);
     const label = mark(workspace("a"))
       .locator("xpath=ancestor::span[span[contains(@class, 'truncate')]]")
       .locator("span.truncate");
@@ -167,7 +218,7 @@ export async function runDraftIndicatorsSmoke({
   ).toEqual(["a"]);
   await expect(workspace("b")).toHaveAttribute("data-active", "true");
   check(
-    "the archive action over a pencil archives its owner without selecting it",
+    "the archive action on a drafted workspace archives its owner without selecting it",
     true,
   );
   await page.evaluate(() => {
@@ -199,14 +250,9 @@ export async function runDraftIndicatorsSmoke({
   });
   const busyBox = await busy.boundingBox();
   const draftBox = await mark(workspace("b")).boundingBox();
-  // Sidebar rows trail with state, then the pencil at the row's end.
-  expect(busyBox.x + busyBox.width).toBeLessThanOrEqual(draftBox.x);
-  await verifySlot(
-    workspace("b"),
-    /^Archive workspace/,
-    220,
-    "mixed repositories",
-  );
+  // The pencil follows the title; the agent loader holds line 1's right end.
+  expect(draftBox.x + draftBox.width).toBeLessThanOrEqual(busyBox.x);
+  await verifyWorkspacePencil(workspace("b"), "mixed repositories");
   await page.evaluate(() => window.draftIndicatorsHarness.mixedBusy(false));
   check(
     "a draft pencil and its archive action stay clear of a mixed workspace's agent status",

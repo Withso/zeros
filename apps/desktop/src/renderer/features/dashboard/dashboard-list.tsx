@@ -7,7 +7,8 @@ import {
 } from "react";
 import { ArchiveLineUnits } from "./archive-line";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Archive, Folder, FolderX } from "lucide-react";
+import { Folder, FolderX } from "lucide-react";
+import { ArchiveIcon } from "../../shared/ui/archive-icon";
 import { cn } from "../../shared/ui/cn";
 import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
 import { initialsOf } from "../../shared/lib/initials";
@@ -314,7 +315,7 @@ export const DashboardListRow = forwardRef<
               aria-label={status}
             >
               {archived ? (
-                <Archive className="text-fg3 size-3.5 shrink-0" />
+                <ArchiveIcon className="text-fg3 size-3.5 shrink-0" />
               ) : missing ? (
                 <FolderX className="text-red-text size-3.5 shrink-0" />
               ) : folder ? (

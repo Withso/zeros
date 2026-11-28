@@ -8,7 +8,11 @@ export type SidebarPlacement = "local" | "cloud";
 /** Groupings beyond the persisted Repository / Status / None presentation. */
 export type SidebarExtraGrouping = "placement" | "owner" | "recency" | "pr";
 export type SidebarThenBy = "repository" | "status" | SidebarExtraGrouping;
-export type SidebarAgentStatusFilter = "input" | "working" | "unread" | "failed" | "idle";
+/** Group › Status and Filter › Status: Needs you (a question, a plan, a
+ * failure or a finished unread turn), Working, Idle. */
+export type SidebarAgentStatusFilter = "needs-you" | "working" | "idle";
+/** The groupings whose groups the Group menu can reorder and hide. */
+export type SidebarGroupingId = "repository" | "status" | SidebarExtraGrouping;
 export type SidebarPrFilter = "none" | "draft" | "open" | "conflicts" | "merged" | "closed";
 export type SidebarOwnerFilter = "mine" | "following";
 export type SidebarSection = "pinned" | "mine" | "following" | "archived";
@@ -32,15 +36,26 @@ export interface SidebarViewPreferences {
   showArchived: boolean;
   collapsedSections: readonly SidebarSection[];
   collapsedGroups: readonly string[];
+  /** Per grouping, the group keys the user dragged into an order. Keys it
+   *  lists come first in that order; new groups follow in their default. */
+  groupOrder: Readonly<Partial<Record<SidebarGroupingId, readonly string[]>>>;
+  /** Per grouping, the group keys hidden with the Group menu's eye. */
+  hiddenGroups: Readonly<Partial<Record<SidebarGroupingId, readonly string[]>>>;
 }
 
-export const SIDEBAR_AGENT_STATUS_FILTERS: readonly SidebarAgentStatusFilter[] = ["input", "working", "unread", "failed", "idle"];
+export const SIDEBAR_AGENT_STATUS_FILTERS: readonly SidebarAgentStatusFilter[] = ["needs-you", "working", "idle"];
+/** Earlier builds stored five statuses; each folds into the group that now holds it. */
+const LEGACY_STATUS_FILTERS: Readonly<Record<string, SidebarAgentStatusFilter>> = {
+  input: "needs-you", failed: "needs-you", unread: "needs-you", working: "working", idle: "idle",
+};
+export const SIDEBAR_GROUPING_IDS: readonly SidebarGroupingId[] = ["repository", "status", "placement", "owner", "recency", "pr"];
 export const SIDEBAR_PR_FILTERS: readonly SidebarPrFilter[] = ["none", "draft", "open", "conflicts", "merged", "closed"];
 export const SIDEBAR_OWNER_FILTERS: readonly SidebarOwnerFilter[] = ["mine", "following"];
 const EXTRA_GROUPINGS: readonly SidebarExtraGrouping[] = ["placement", "owner", "recency", "pr"];
 const THEN_BY: readonly SidebarThenBy[] = ["repository", "status", ...EXTRA_GROUPINGS];
 const SECTIONS: readonly SidebarSection[] = ["pinned", "mine", "following", "archived"];
 const MAX_COLLAPSED_GROUPS = 128;
+const MAX_GROUP_KEYS = 256;
 
 export const SIDEBAR_VIEW_DEFAULTS: SidebarViewPreferences = Object.freeze({
   direction: "desc",
@@ -59,10 +74,31 @@ export const SIDEBAR_VIEW_DEFAULTS: SidebarViewPreferences = Object.freeze({
   showArchived: false,
   collapsedSections: Object.freeze([]),
   collapsedGroups: Object.freeze([]),
+  groupOrder: Object.freeze({}),
+  hiddenGroups: Object.freeze({}),
 });
 
 function pick<T extends string>(value: unknown, allowed: readonly T[]): readonly T[] {
   return Array.isArray(value) ? allowed.filter((option) => value.includes(option)) : [];
+}
+
+function statusFilters(value: unknown): readonly SidebarAgentStatusFilter[] {
+  if (!Array.isArray(value)) return [];
+  const folded = new Set(value.flatMap((entry) =>
+    typeof entry === "string" && Object.hasOwn(LEGACY_STATUS_FILTERS, entry) ? [LEGACY_STATUS_FILTERS[entry]] : []));
+  for (const entry of value) if ((SIDEBAR_AGENT_STATUS_FILTERS as readonly unknown[]).includes(entry)) folded.add(entry as SidebarAgentStatusFilter);
+  return SIDEBAR_AGENT_STATUS_FILTERS.filter((status) => folded.has(status));
+}
+
+function groupKeysByGrouping(value: unknown): Partial<Record<SidebarGroupingId, readonly string[]>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(SIDEBAR_GROUPING_IDS.flatMap((grouping) => {
+    const keys = record[grouping];
+    if (!Array.isArray(keys)) return [];
+    const valid = [...new Set(keys.filter(validId))].slice(0, MAX_GROUP_KEYS);
+    return valid.length ? [[grouping, valid]] : [];
+  }));
 }
 
 function sidebarView(raw: unknown): SidebarViewPreferences {
@@ -75,7 +111,7 @@ function sidebarView(raw: unknown): SidebarViewPreferences {
     grouping: EXTRA_GROUPINGS.find((option) => option === value.grouping) ?? null,
     thenBy: THEN_BY.find((option) => option === value.thenBy) ?? null,
     hideEmptyGroups: flag("hideEmptyGroups"),
-    statuses: pick(value.statuses, SIDEBAR_AGENT_STATUS_FILTERS),
+    statuses: statusFilters(value.statuses),
     prStates: pick(value.prStates, SIDEBAR_PR_FILTERS),
     owners: pick(value.owners, SIDEBAR_OWNER_FILTERS),
     unreadOnly: flag("unreadOnly"),
@@ -88,6 +124,8 @@ function sidebarView(raw: unknown): SidebarViewPreferences {
     collapsedGroups: Array.isArray(value.collapsedGroups)
       ? [...new Set(value.collapsedGroups.filter(validId))].slice(-MAX_COLLAPSED_GROUPS)
       : [],
+    groupOrder: groupKeysByGrouping(value.groupOrder),
+    hiddenGroups: groupKeysByGrouping(value.hiddenGroups),
   };
 }
 
@@ -261,6 +299,31 @@ export function setSidebarSectionCollapsed(section: SidebarSection, collapsed: b
   const { view } = getSidebarListPreferences();
   const rest = view.collapsedSections.filter((value) => value !== section);
   setSidebarView({ collapsedSections: collapsed ? [...rest, section] : rest });
+}
+
+/** Move or hide one grouping's groups from the Group menu. `order` is the
+ *  full painted order; an empty list clears it. */
+/** The stored order after the user reordered the groups a (possibly filtered)
+ * menu lists: those take their new order in the places they held, and groups
+ * the menu left out keep theirs. */
+export function mergeSidebarGroupOrder(stored: readonly string[] | undefined, next: readonly string[]): string[] {
+  if (!stored?.length) return [...next];
+  const listed = new Set(next);
+  const known = new Set(stored);
+  let index = 0;
+  return [...stored, ...next.filter((key) => !known.has(key))].map((key) => (listed.has(key) ? next[index++]! : key));
+}
+
+export function setSidebarGroupOrder(grouping: SidebarGroupingId, order: readonly string[]): void {
+  const { view } = getSidebarListPreferences();
+  setSidebarView({ groupOrder: { ...view.groupOrder, [grouping]: mergeSidebarGroupOrder(view.groupOrder[grouping], order) } });
+}
+
+export function setSidebarGroupHidden(grouping: SidebarGroupingId, key: string, hidden: boolean): void {
+  if (!validId(key)) return;
+  const { view } = getSidebarListPreferences();
+  const rest = (view.hiddenGroups[grouping] ?? []).filter((value) => value !== key);
+  setSidebarView({ hiddenGroups: { ...view.hiddenGroups, [grouping]: hidden ? [...rest, key] : rest } });
 }
 
 export function setSidebarGroupCollapsed(key: string, collapsed: boolean): void {

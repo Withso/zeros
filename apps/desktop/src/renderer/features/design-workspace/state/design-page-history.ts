@@ -45,7 +45,7 @@ export async function restoreDesignPageHistorySelection(
   if (page)
     useDesignWorkspaceUiStore
       .getState()
-      .setActivePage(workspaceId, page.id, owner.directoryId);
+      .setActivePage(workspaceId, page.id, owner.directoryId, { user: true });
   if (result.historySelection === undefined) {
     const frame = frames.find((frame) => frame.file === affected);
     if (
