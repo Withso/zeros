@@ -422,6 +422,12 @@ function removeRecordKey<T>(
   return next;
 }
 
+/** Edit stashes are keyed `${chatId}:${messageId}`; a cloud-scoped chat id
+ * has exactly four colon-separated parts because its native id is encoded. */
+export function editDraftChatId(key: string): string {
+  return key.startsWith("cloud:") ? key.split(":").slice(0, 4).join(":") : key.slice(0, key.indexOf(":"));
+}
+
 function removeRecordKeysMatching<T>(
   record: Record<string, T>,
   matches: (key: string) => boolean,
@@ -1280,6 +1286,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const folders = action.folders.filter(isCloudWorkspace);
       if (!folders.length) return state;
       const removed = (folder: string) => folders.some(root => folderIsWithinRoot(folder, root));
+      // Unsent drafts belong to the chats being removed, as DELETE_CHAT drops them.
+      const removedChat = (chatId: string) => {
+        const scope = parseCloudScopedId(chatId);
+        return !!scope && removed(cloudWorkspaceKey(scope));
+      };
       const activeRemoved = removed(selectActiveFolder(state) ?? "");
       let next = state;
       for (const folder of folders) {
@@ -1288,6 +1299,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return {
         ...next,
         chats: next.chats.filter(chat => !removed(chat.folder)),
+        chatComposerDrafts: removeRecordKeysMatching(next.chatComposerDrafts, removedChat),
+        editComposerDrafts: removeRecordKeysMatching(next.editComposerDrafts, key => removedChat(editDraftChatId(key))),
         pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
         lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
         ...(activeRemoved ? {

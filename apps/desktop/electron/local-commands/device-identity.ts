@@ -4,14 +4,36 @@ import { hostname } from "node:os";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+type SettingStore = { get(key: string): string; set(key: string, value: string): void };
+const accountKey = (prefix: string, accountId: string) => `${prefix}.${createHash("sha256").update(accountId).digest("hex").slice(0, 32)}`;
+/** Compatibility contract: the device-wide setting every release before
+ * per-account consent wrote. */
+const LEGACY_ALWAYS_ALLOW_KEY = "localCommandsAlwaysAllow";
+
 /** One stable id per signed-in account on this install. */
-export function deviceIdFor(store: { get(key: string): string; set(key: string, value: string): void }, accountId: string): string {
-  const key = `localCommandsDevice.${createHash("sha256").update(accountId).digest("hex").slice(0, 32)}`;
+export function deviceIdFor(store: SettingStore, accountId: string): string {
+  const key = accountKey("localCommandsDevice", accountId);
   const existing = store.get(key);
   if (UUID.test(existing)) return existing.toLowerCase();
   const created = randomUUID();
   store.set(key, created);
   return created;
+}
+
+/** Always allow is one person's consent for their own agents, so another
+ * account signed in on this Mac never inherits it. A pre-upgrade device-wide
+ * value moves to the first account that reads it, then no longer exists. */
+export function alwaysAllowFor(store: SettingStore, accountId: string): boolean {
+  const key = accountKey(LEGACY_ALWAYS_ALLOW_KEY, accountId), value = store.get(key);
+  if (value === "true" || value === "false") return value === "true";
+  const legacy = store.get(LEGACY_ALWAYS_ALLOW_KEY) === "true";
+  store.set(key, String(legacy));
+  store.set(LEGACY_ALWAYS_ALLOW_KEY, "");
+  return legacy;
+}
+
+export function setAlwaysAllowFor(store: SettingStore, accountId: string, value: boolean): void {
+  store.set(accountKey(LEGACY_ALWAYS_ALLOW_KEY, accountId), String(value));
 }
 
 /** A name the wire accepts: trimmed, 1..128 characters, no control characters. */

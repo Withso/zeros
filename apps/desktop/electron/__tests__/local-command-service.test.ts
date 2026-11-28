@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LocalCommandDevice, LocalCommandMacResult, LocalCommandNotice, LocalCommandPendingNotice } from "@zeros/protocol/local-commands";
 import { DeviceControlError, type DeviceEvent } from "../local-commands/control";
+import { alwaysAllowFor, setAlwaysAllowFor } from "../local-commands/device-identity";
 import { LocalCommandJournal } from "../local-commands/journal";
 import { LocalCommandService, type LocalCommandServiceDeps } from "../local-commands/service";
 
@@ -52,7 +53,7 @@ function harness(options: { journalRoot?: string; alwaysAllow?: boolean; run?: L
     journal: async () => LocalCommandJournal.open(options.journalRoot!, account),
     run: options.run ?? (async (input, signal) => { running.set(input.command, signal); calls.push(`run ${input.command}`); return { outcome: "completed", code: 0, stdout: "hi\n", stderr: "", cwd: "/Users/alex/src" }; }),
     identity: { deviceId: () => deviceId, name: async () => "Studio" },
-    settings: { alwaysAllow: () => always, setAlwaysAllow: value => { always = value; calls.push(`always ${value}`); } },
+    settings: { alwaysAllow: () => always, setAlwaysAllow: (_accountId, value) => { always = value; calls.push(`always ${value}`); } },
     session: async () => ({ accountId: account, sessionId: "s1" }),
     publish: approvals => { published.push(approvals.map(approval => approval.requestId)); },
     notify: approval => { notified.push(approval.requestId); },
@@ -154,6 +155,35 @@ describe("local command service", () => {
     await until(() => s.results.length === 1);
     expect(s.alwaysAllowed()).toBe(true);
     await s.service.stop();
+  });
+
+  it("keeps Always allow with the account that chose it: the next account on this Mac is asked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-service-")); directories.push(root);
+    const values = new Map<string, string>(), store = { get: (key: string) => values.get(key) ?? "", set: (key: string, value: string) => { values.set(key, value); } };
+    const b = "66666666-6666-4666-8666-666666666666";
+    let signedIn = account;
+    const h = harness({ journalRoot: root });
+    h.deps.settings = { alwaysAllow: id => alwaysAllowFor(store, id), setAlwaysAllow: (id, value) => setAlwaysAllowFor(store, id, value) };
+    h.deps.session = async () => ({ accountId: signedIn, sessionId: signedIn });
+    h.deps.journal = async id => LocalCommandJournal.open(root, id);
+    const service = new LocalCommandService(h.deps);
+    await service.start();
+    await vi.waitFor(() => expect(h.calls).toContain("register"));
+    h.push({ event: "request", data: notice(R1) });
+    await until(() => h.published.at(-1)?.includes(R1));
+    await service.decide(R1, "always");
+    await until(() => h.results.length === 1);
+
+    await service.beforeSignOut();
+    signedIn = b;
+    await service.start();
+    await vi.waitFor(() => expect(h.calls.filter(call => call === "register")).toHaveLength(2));
+    h.push(null); // The scripted channel's waiter from A's aborted stream takes one event.
+    h.push({ event: "request", data: notice(R2) });
+    await until(() => h.published.at(-1)?.includes(R2));
+    expect(h.calls.some(call => call.startsWith(`claim ${R2}`))).toBe(false);
+    expect(alwaysAllowFor(store, account)).toBe(true);
+    await service.stop();
   });
 
   it("kills a running command when its notice turns terminal (Stop)", async () => {
