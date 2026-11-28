@@ -8,6 +8,8 @@
 // --- IMPORTS ---
 
 import { takeDesignSyncAgentRequest } from "../../state/design-sync-intent";
+import { useChats } from "../../state/workspace-store";
+import { useAnyChatAgentActivity } from "../agent/sessions-store";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { designSyncBrief } from "./design-agent-brief";
 import { useAskDesignAgent } from "./design-agent-sync";
@@ -47,6 +49,7 @@ import { useDesignStyleBuildPresence } from "./state/use-design-style-build-pres
 import { startDesignAgentDraftEvents } from "./state/design-agent-drafts";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignLifecycleFeedback } from "./state/use-design-lifecycle-feedback";
+import { updateDesignAgentPageFollow, type DesignAgentPageFollowMemory } from "./state/design-agent-page-follow";
 
 import { DesignCanvas, EMPTY_NODE_IDS } from "./design-canvas";
 import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-saved-editing";
@@ -121,6 +124,7 @@ export function DesignWorkspaceColumn({
   const sectionRef = useRef<HTMLElement | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
   const workspaceId = workspace?.id ?? null;
+  const agentPageFollowRef = useRef<DesignAgentPageFollowMemory | null>(null);
   // Serialized names predate the floating panel: `inspectorVisible` now puts
   // the whole Style + Layers panel away, and `layersDrawerOpen` opens the
   // Layers drawer at its foot (the older `layersVisible` no longer applies).
@@ -174,6 +178,9 @@ export function DesignWorkspaceColumn({
   const confirmedActivePageId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
+  const pageNavigationEvent = useDesignWorkspaceUiStore(state =>
+    workspaceId ? state.byWorkspace[workspaceId]?.pageNavigationEvent ?? 0 : 0,
+  );
   const confirmedDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
@@ -197,6 +204,11 @@ export function DesignWorkspaceColumn({
     if (data.pageCatalog || data.mutationCatalog || data.preparation) return undefined;
     return normalizeDesignPagesSnapshot(data).pages;
   }, [snapshot.data]);
+  const chats = useChats();
+  const workspaceChatIds = useMemo(() => folder
+    ? chats.filter(chat => chat.folder === folder && chat.kind !== "terminal").map(chat => chat.id)
+    : [], [chats, folder]);
+  const agentTurnActivity = useAnyChatAgentActivity(workspaceChatIds);
   const allowPassiveSelection = Boolean(
     !presentedHistory && snapshot.data && !bootPreview &&
     snapshot.data.directoryId === confirmedDirectoryId &&
@@ -227,6 +239,21 @@ export function DesignWorkspaceColumn({
     if (!surfaceActive || !workspaceId || bootPreview || !confirmedPageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
     bindDesignWorkspacePages(workspaceId, confirmedPageSnapshot.directoryId, confirmedPageSnapshot.pages!);
   }, [surfaceActive, workspaceId, bootPreview, confirmedPageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
+  useEffect(() => {
+    if (!workspaceId || bootPreview || !confirmedPageSnapshot?.pages?.length) return;
+    const follow = updateDesignAgentPageFollow(agentPageFollowRef.current, {
+      active: surfaceActive,
+      turnActive: agentTurnActivity !== null,
+      directoryId: confirmedPageSnapshot.directoryId,
+      activePageId: confirmedActivePageId,
+      pages: confirmedPageSnapshot.pages,
+      navigationEvent: pageNavigationEvent,
+    });
+    agentPageFollowRef.current = follow.memory;
+    if (follow.switchToPageId) {
+      useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, follow.switchToPageId, confirmedPageSnapshot.directoryId);
+    }
+  }, [surfaceActive, workspaceId, bootPreview, confirmedPageSnapshot, confirmedActivePageId, agentTurnActivity, pageNavigationEvent]);
   useEffect(() => {
     if (!surfaceActive || !workspaceId || bootPreview || !confirmedActivePageId || !confirmedPageSnapshot?.directoryId ||
       !confirmedPageSnapshot.pages?.some(page => page.id === confirmedActivePageId)) return;
