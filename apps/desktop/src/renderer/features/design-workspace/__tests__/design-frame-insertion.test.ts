@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import {
   canInsertDesignFrame,
+  designUngroupOperations,
   designWrapInFlow,
+  designWrapSelectionOperations,
   designShiftAConvertsInPlace,
   designDrawnFrameWrapOperations,
   designFrameInsertionOperations,
@@ -89,6 +91,77 @@ describe("child frame insertion", () => {
     expect(ops.some(op => op.type === "node.set-styles" && op.nodeId === parent.oid)).toBe(false);
     expect(ops.find(op => op.type === "node.set-html")?.html).toContain("position:absolute;left:210px;top:220px;");
   });
+  it("groups absolute layers into a transparent wrapper without changing their canvas positions", () => {
+    const absolute = (oid: string, x: number, width = 61) => ({
+      ...parent,
+      oid,
+      styles: {
+        ...parent.styles,
+        position: "absolute",
+        left: `${x}px`,
+        top: "30px",
+        width: `${width}px`,
+        height: "60px",
+        boxSizing: "border-box",
+      },
+      layout: {
+        parentId: "parent",
+        x,
+        y: 30,
+        parentWidth: 200,
+        parentHeight: 200,
+        parentDisplay: "block",
+        parentPosition: "relative",
+        isContainingBlock: true,
+      },
+      box: { x, y: 30, width, height: 60, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+      rect: { x, y: 30, width, height: 60 },
+    }) as DesignRuntimeNodeDetails;
+    const ops = designWrapSelectionOperations(
+      parent,
+      [absolute("a", 10), absolute("b", 84, 64)],
+      "group-test",
+      "group",
+    );
+    const html = ops.find((op) => op.type === "node.set-html");
+    expect(html).toMatchObject({
+      nodeId: "parent",
+      html: expect.stringContaining("left:10px;top:30px;width:138px;height:60px"),
+    });
+    expect(html?.html).toContain("background-color:transparent");
+    expect(
+      ops.find(
+        (op) => op.type === "node.set-styles" && op.nodeId === "b",
+      ),
+    ).toMatchObject({
+      styles: { left: "74px", top: "0px" },
+    });
+  });
+
+  it("ungroups a generated wrapper by restoring children to its parent", () => {
+    const group = {
+      ...parent,
+      oid: "group-test",
+      styles: { ...parent.styles, position: "absolute", left: "10px", top: "30px" },
+      layout: { parentId: "parent", x: 10, y: 30, parentWidth: 200, parentHeight: 200, parentDisplay: "block", parentPosition: "relative", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    const child = {
+      ...parent,
+      oid: "a",
+      styles: { ...parent.styles, position: "absolute", left: "4px", top: "0px" },
+      layout: { parentId: "group-test", x: 4, y: 0, parentWidth: 138, parentHeight: 60, parentDisplay: "block", parentPosition: "absolute", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    const ops = designUngroupOperations(parent, group, [child]);
+    expect(ops).toContainEqual(
+      expect.objectContaining({ type: "node.delete", nodeId: "group-test" }),
+    );
+    expect(
+      ops.find(
+        (op) => op.type === "node.set-styles" && op.nodeId === "a",
+      ),
+    ).toMatchObject({ styles: { left: "14px" } });
+  });
+
   it("keeps the slot block layers reserve when Shift+A wraps them", () => {
     // Two stacked paragraphs of an auto-height card: the wrapper stays in
     // flow where the first one stood, so the card keeps its height.

@@ -162,6 +162,7 @@ import {
   designLayoutResizedFrame,
   isDesignLayoutChildAction,
 } from "./design-layout-children";
+import { designLayoutSelectionUpdates } from "./design-layout-selection";
 import {
   designLayoutActionStyles,
   designLayoutActionForConfirmedDetails,
@@ -3111,6 +3112,12 @@ export const DesignInspector = React.memo(function DesignInspector({
         assertFrameCurrent();
         let updates: Map<string, Record<string, string | null>>;
         if (
+          (action.type === "align" || action.type === "distribute") &&
+          action.target === "self" &&
+          details.length > 1
+        ) {
+          updates = designLayoutSelectionUpdates(details, action);
+        } else if (
           isDesignLayoutChildAction(action) ||
           action.type === "auto-layout"
         ) {

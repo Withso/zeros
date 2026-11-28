@@ -278,6 +278,29 @@ export function DesignPositionSection({
           ))}
         </div>
       ) : null}
+      {free && selection.length >= 3 ? (
+        <div
+          data-design-position-distribute=""
+          className="grid grid-cols-2 gap-2"
+        >
+          {([
+            ["x", "Distribute horizontally", AlignHorizontalDistributeCenter],
+            ["y", "Distribute vertically", AlignVerticalDistributeCenter],
+          ] as const).map(([axis, label, Icon]) => (
+            <InspectorIconButton
+              key={label}
+              label={label}
+              tooltip={label}
+              disabled={disabled}
+              onClick={() =>
+                onAction({ type: "distribute", axis, target: "self" })
+              }
+            >
+              <Icon />
+            </InspectorIconButton>
+          ))}
+        </div>
+      ) : null}
       <div
         data-design-layout-geometry=""
         className="grid grid-cols-2 gap-2"
