@@ -24,6 +24,7 @@ export type DesignBottomPanel = "layers" | "assets";
 let nextSelectionEvent = 0;
 let nextOwnerRevision = 0;
 let nextDirectoryRevision = 0;
+let nextPageNavigationEvent = 0;
 
 export interface DesignWorkspaceViewState {
   directoryId?: string;
@@ -46,6 +47,8 @@ export interface DesignWorkspaceViewState {
   selectedTargets: readonly DesignSelectionTarget[];
   selectionEvent?: number;
   ownerRevision?: number;
+  /** Runtime-only count of explicit user page navigation during this app run. */
+  pageNavigationEvent?: number;
   /** Runtime session identity; page navigation does not invalidate history. */
   directoryRevision?: number;
   panel: DesignBottomPanel;
@@ -303,7 +306,7 @@ function pruneViews(
 function writeViews(views: Record<string, DesignWorkspaceViewState>): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views, (key, value) => key === "selectionEvent" || key === "ownerRevision" || key === "directoryRevision" ? undefined : value));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(views, (key, value) => key === "selectionEvent" || key === "ownerRevision" || key === "directoryRevision" || key === "pageNavigationEvent" ? undefined : value));
   } catch {
     // Navigation persistence is best-effort in private/quota-limited storage.
   }
@@ -344,7 +347,7 @@ interface DesignWorkspaceUiStore {
   byWorkspace: Record<string, DesignWorkspaceViewState>;
   bindDirectory(workspaceId: string, directoryId: string): void;
   bindPages(workspaceId: string, directoryId: string | undefined, pages: readonly DesignPageSummary[]): void;
-  setActivePage(workspaceId: string, pageId: string, directoryId?: string): void;
+  setActivePage(workspaceId: string, pageId: string, directoryId?: string, options?: { user?: boolean }): void;
   setSelectedFrame(workspaceId: string, frame: string | null, owner?: DesignPageOwner): void;
   setSelection(
     workspaceId: string,
@@ -384,6 +387,7 @@ function updateWorkspaceView(
     byPage: undefined,
   });
   next.selectionEvent = patch.selectionEvent ?? previous.selectionEvent;
+  next.pageNavigationEvent = patch.pageNavigationEvent ?? previous.pageNavigationEvent;
   next.directoryRevision = previous.directoryId !== next.directoryId
     ? ++nextDirectoryRevision : previous.directoryRevision;
   next.ownerRevision = (previous.directoryId !== undefined && previous.directoryId !== next.directoryId) ||
@@ -432,14 +436,15 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
           Object.entries(bounded).every(([id, view]) => savedPage(previous.byPage, id) === view)) return state;
         const next = { ...base, ...active, ...(directoryId ? { directoryId } : {}), activePageId, byPage: bounded, updatedAt: Date.now(),
           directoryRevision: directoryId !== undefined && previous.directoryId !== directoryId ? ++nextDirectoryRevision : previous.directoryRevision,
-          ownerRevision: replaced || (previous.activePageId !== undefined && previous.activePageId !== activePageId) ? ++nextOwnerRevision : previous.ownerRevision };
+          ownerRevision: replaced || (previous.activePageId !== undefined && previous.activePageId !== activePageId) ? ++nextOwnerRevision : previous.ownerRevision,
+          pageNavigationEvent: previous.pageNavigationEvent };
         const byWorkspace = pruneViews({ ...state.byWorkspace, [workspaceId]: next });
         persistViews(byWorkspace);
         return { byWorkspace };
       });
     },
 
-    setActivePage(workspaceId, pageId, directoryId) {
+    setActivePage(workspaceId, pageId, directoryId, options) {
       if (!designPageIdSchema.safeParse(pageId).success) return;
       set(state => {
         const previous = state.byWorkspace[workspaceId];
@@ -447,7 +452,8 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
         const memory = { ...previous.byPage };
         if (previous.activePageId) memory[previous.activePageId] = pageView(previous);
         const active = savedPage(memory, pageId) ?? pageView(DEFAULT_DESIGN_WORKSPACE_VIEW);
-        return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, { ...active, activePageId: pageId, byPage: memory }) };
+        return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, { ...active, activePageId: pageId, byPage: memory,
+          ...(options?.user ? { pageNavigationEvent: ++nextPageNavigationEvent } : {}) }) };
       });
     },
 
