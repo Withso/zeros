@@ -186,6 +186,7 @@ import {
   designLayerTopLevelSelectionIds,
   flattenDesignLayerTree,
 } from "./design-layer-tree";
+import { layerRowKey } from "./design-layer-panel-rows";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
 import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
@@ -6747,7 +6748,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           navigateToNode(parentId);
           if (keyboardTreeFocus) {
             const focusParentRow = () => {
-              const row = document.querySelector<HTMLElement>(`[data-design-layer-id="${CSS.escape(parentId)}"]`);
+              const row = document.querySelector<HTMLElement>(`[data-design-panel-row="${CSS.escape(layerRowKey(selectedFrame.file, parentId))}"]`);
               row?.focus({ preventScroll: true });
               return row !== null;
             };
