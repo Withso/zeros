@@ -488,6 +488,7 @@ export function InspectorEditField({
     moved: boolean;
   } | null>(null);
   const arrowSequenceRef = useRef<{ start: string } | null>(null);
+  const [arrowStepping, setArrowStepping] = useState(false);
   const previewFrameRef = useRef<number | null>(null);
   /** The newest value asked for while this frame's preview already left. */
   const pendingPreviewRef = useRef<string | null>(null);
@@ -679,6 +680,8 @@ export function InspectorEditField({
   };
 
   const commit = async (requestedDraft = draftRef.current) => {
+    arrowSequenceRef.current = null;
+    setArrowStepping(false);
     if (disabledRef.current) {
       if (revalidatingRef.current) {
         pendingCommitRef.current = requestedDraft;
@@ -966,7 +969,7 @@ export function InspectorEditField({
           ref={inputRef}
           id={id}
           aria-label={label}
-          data-design-draft={draft === String(value) ? "clean" : "dirty"}
+          data-design-draft={draft === String(value) && !arrowStepping ? "clean" : "dirty"}
           value={presentation.text}
           placeholder={placeholder}
           disabled={disabled && !(revalidating && focused)}
@@ -1023,7 +1026,6 @@ export function InspectorEditField({
             ) {
               return;
             }
-            arrowSequenceRef.current = null;
             void commit();
           }}
           aria-keyshortcuts={tokensOffered ? "Alt+ArrowDown" : undefined}
@@ -1056,6 +1058,9 @@ export function InspectorEditField({
                 event.preventDefault();
                 arrowSequenceRef.current ??= { start: baselineRef.current };
                 const resolved = withinRange(next);
+                const moved = resolved !== arrowSequenceRef.current.start;
+                if (!moved) arrowSequenceRef.current = null;
+                setArrowStepping(moved);
                 setPresentedDraft(resolved);
                 preview(resolved);
               }
@@ -1081,6 +1086,7 @@ export function InspectorEditField({
               skipCommitRef.current = true;
               const sequenceStart = arrowSequenceRef.current?.start;
               arrowSequenceRef.current = null;
+              setArrowStepping(false);
               // A preceding commit can publish its authoritative computed
               // value while this input is focused. The synchronization effect
               // deliberately leaves an active draft alone, so the focus-time
@@ -1098,14 +1104,6 @@ export function InspectorEditField({
               }
               event.currentTarget.blur();
             }
-          }}
-          onKeyUp={(event) => {
-            if (
-              (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
-              !arrowSequenceRef.current
-            ) return;
-            arrowSequenceRef.current = null;
-            void commitRef.current?.(draftRef.current);
           }}
         />
         )}
@@ -1215,6 +1213,10 @@ export function InspectorEditField({
                     : `Animate ${label}`
                 }
                 onPointerDown={(event) => event.stopPropagation()}
+                onBlur={(event) => {
+                  if (fieldRef.current?.contains(event.relatedTarget)) return;
+                  void commit();
+                }}
                 onClick={motion.onAddKeyframe}
               >
                 <Diamond
