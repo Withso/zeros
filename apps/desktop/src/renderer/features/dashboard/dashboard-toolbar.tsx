@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  Archive,
   ArrowDownUp,
   ChevronDown,
   Columns3,
@@ -10,6 +9,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { ArchiveIcon } from "../../shared/ui/archive-icon";
 import { Button } from "../../shared/ui/primitives/button";
 import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { Input } from "../../shared/ui/primitives/input";
@@ -194,7 +194,7 @@ export function DashboardToolbar({
               className="text-fg2"
               aria-label="Archive visibility"
             >
-              <Archive />
+              <ArchiveIcon />
               <span>
                 {
                   ARCHIVE_OPTIONS.find(

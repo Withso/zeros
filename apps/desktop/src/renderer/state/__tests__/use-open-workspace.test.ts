@@ -6,6 +6,7 @@ const spawnDefaultChatForWorkspace = vi.fn();
 const prefetchWorkspaceSurface = vi.fn();
 const prepareChatView = vi.fn();
 const selectChatToRestoreForFolder = vi.fn();
+const newestUnreadChatInFolder = vi.fn();
 const pendingWorkspaceMode = vi.fn();
 const wake = vi.hoisted(() => ({ enabled: true, signedIn: true, entitled: true, request: vi.fn() }));
 vi.mock("../../features/settings/internal-features", () => ({ useInternalFeatureActive: () => wake.enabled }));
@@ -36,11 +37,14 @@ vi.mock("../spawn-default-chat", () => ({
   spawnDefaultChatForWorkspace: (...args: unknown[]) =>
     spawnDefaultChatForWorkspace(...args),
 }));
+vi.mock("../../features/agent/chat-unread", () => ({
+  newestUnreadChatInFolder: (...args: unknown[]) => newestUnreadChatInFolder(...args),
+}));
 vi.mock("../store", () => ({
   selectChatToRestoreForFolder: (...args: unknown[]) =>
     selectChatToRestoreForFolder(...args),
   useWorkspaceDispatch: () => dispatch,
-  useWorkspaceStore: { getState: () => ({}) },
+  useWorkspaceStore: { getState: () => ({ chats: [] }) },
 }));
 vi.mock("../../shell/prefetch-workspace-surface", () => ({
   prefetchWorkspaceSurface: (...args: unknown[]) =>
@@ -57,10 +61,25 @@ const { useOpenWorkspace } = await import("../use-open-workspace");
 beforeEach(() => {
   vi.clearAllMocks();
   pendingWorkspaceMode.mockReturnValue(null);
+  newestUnreadChatInFolder.mockReturnValue(null);
   wake.enabled = true; wake.signedIn = true; wake.entitled = true;
 });
 
 describe("useOpenWorkspace", () => {
+  it("opens the chat that finished unread, so opening the workspace reads it", () => {
+    newestUnreadChatInFolder.mockReturnValue("finished-chat");
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({ id: "w", path: "/repo/w", repoRoot: "/repo" });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "OPEN_WORKSPACE", chatId: "finished-chat" }));
+    expect(prepareChatView).toHaveBeenCalledWith("finished-chat");
+  });
+
+  it("restores the last-viewed chat when nothing finished unread", () => {
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({ id: "w", path: "/repo/w", repoRoot: "/repo" });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "OPEN_WORKSPACE", chatId: "saved-chat" }));
+  });
+
   it.each(["code", "design"] as const)("keeps Local %s navigation free of Cloud open intents for a signed-in member", kind => {
     selectChatToRestoreForFolder.mockReturnValue("saved-chat");
     const open = useOpenWorkspace();

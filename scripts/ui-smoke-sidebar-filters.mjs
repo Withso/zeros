@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { openSidebarSubmenu, selectSidebarGrouping, selectSidebarSort } from "./ui-smoke/sidebar-menu.mjs";
+import { closeSidebarMenu, openSidebarSubmenu, selectSidebarGrouping, selectSidebarSort } from "./ui-smoke/sidebar-menu.mjs";
 
 export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   // Owner isolation below is the stable sidebar; the unified section follows.
@@ -10,16 +10,15 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     name: "Filter workspaces",
     exact: true,
     // The modal menu hides the surrounding sidebar from the accessibility
-    // tree while its still-visible trigger updates the filter indicator.
+    // tree while its still-visible trigger keeps its description current.
     includeHidden: true,
   });
-  const indicator = trigger.locator("[data-filter-indicator]");
+  // A changed view is announced, never painted: the filter icon carries no dot.
   const expectFilterIndicator = async (active) => {
     await expect(trigger).toHaveAccessibleDescription(
       active ? "View changed from defaults" : "",
     );
-    await expect(indicator).toHaveCount(active ? 1 : 0);
-    if (active) await expect(indicator).toBeVisible();
+    await expect(trigger.locator("[data-filter-indicator]")).toHaveCount(0);
   };
   const row = (id) => page.locator(`[data-workspace-id="${id}"]`);
   const order = () =>
@@ -62,37 +61,81 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   );
 
   await selectGroup("Status");
-  expect(
-    await page
-      .locator("[data-sidebar-status]")
-      .evaluateAll((nodes) => nodes.map((node) => node.dataset.sidebarStatus)),
-  ).toEqual(["backlog", "in-progress", "in-review", "done", "cancelled"]);
-  await expect(
+  const groupKeys = () =>
     page
-      .getByRole("group", { name: "Done workspaces", exact: true })
-      .locator('[data-workspace-id="ws-new-york"]'),
-  ).toBeVisible();
+      .locator('[data-sidebar-section="mine"] ~ [role="group"] [data-sidebar-group], [data-sidebar-group]')
+      .evaluateAll((nodes) => [...new Set(nodes.map((node) => node.dataset.sidebarGroup))]);
   await page.evaluate(() =>
-    window.appSidebarUpdateWorkspace("ws-seville", { status: "in-review" }),
+    window.appSidebarUpdateWorkspace("ws-seville", { setupState: "failed" }),
   );
-  await expect(
-    page
-      .getByRole("group", { name: "In review workspaces", exact: true })
-      .locator('[data-workspace-id="ws-seville"]'),
-  ).toBeVisible();
-  const progress = page.locator('[data-sidebar-status="in-progress"]');
-  await progress.click();
-  await expect(progress).toHaveAttribute("aria-expanded", "false");
+  const needsYou = page.getByRole("group", { name: "Needs you workspaces", exact: true });
+  const idle = page.getByRole("group", { name: "Idle workspaces", exact: true });
+  await expect(needsYou.locator('[data-workspace-id="ws-seville"]')).toBeVisible();
+  await expect(needsYou.locator('[data-workspace-id="ws-seville"]')).toContainText("Setup failed");
+  await expect(idle.locator('[data-workspace-id="ws-boston"]')).toBeVisible();
+  await expect
+    .poll(async () => (await groupKeys()).filter((key) => /needs-you|idle/.test(key)))
+    .toEqual(["group:needs-you", "group:idle"]);
+  const idleHeader = page.locator('[data-sidebar-group="group:idle"]');
+  const idleToggle = idleHeader.getByRole("button", { name: /^Idle, \d+$/ });
+  await idleToggle.click();
+  await expect(idleToggle).toHaveAttribute("aria-expanded", "false");
   await expect(row("ws-atlanta")).toBeVisible();
   await expect(row("ws-boston")).toHaveCount(0);
-  await progress.click();
+  await idleToggle.click();
   await expect(row("ws-boston")).toBeVisible();
   await page.evaluate(() =>
     window.appSidebarUpdateWorkspace("ws-new-york", { archivedAt: 1 }),
   );
-  await expect(row("ws-new-york")).toHaveCount(0);
+  const archived = page.getByRole("group", { name: "Archived workspaces", exact: true });
+  await expect(archived.locator('[data-workspace-id="ws-new-york"]')).toHaveCount(0);
+  await expect(page.locator('[data-sidebar-group="group:archived"]')).toBeVisible();
+  expect((await groupKeys()).at(-1)).toBe("group:archived");
   check(
-    "Status reuses Home's five groups, updates live, excludes archives and keeps the selection through collapse",
+    "Status groups are Needs you, Working, Idle, then Archived; Setup failed needs you, and collapse keeps the selection",
+    true,
+  );
+
+  // The Group menu lists this grouping's groups: the eye hides one (the open
+  // workspace stays), Alt+↑ moves one, and the menu stays open throughout.
+  await openSidebarSubmenu(page, "Group");
+  const idleOrder = page.getByRole("menuitemcheckbox", { name: /^Idle/ });
+  await expect(idleOrder).toHaveAttribute("aria-checked", "true");
+  await idleOrder.click();
+  await expect(idleOrder).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("menu").first()).toBeVisible();
+  await expect(row("ws-boston")).toHaveCount(0);
+  await expect(row("ws-atlanta")).toBeVisible();
+  await idleOrder.click();
+  await expect(idleOrder).toHaveAttribute("aria-checked", "true");
+  const orderLabels = () =>
+    page
+      .locator("[data-sidebar-group-order-list] [role=menuitemcheckbox]")
+      .evaluateAll((nodes) => nodes.map((node) => node.textContent.replace(/\d+$/, "").trim()));
+  await expect.poll(orderLabels).toEqual(["Needs you", "Working", "Idle", "Archived"]);
+  // Park the pointer off the menu: an item sliding under a resting pointer
+  // takes focus the way any menu row does on hover.
+  await page.mouse.move(900, 700);
+  await idleOrder.focus();
+  await page.keyboard.press("Alt+ArrowUp");
+  await expect.poll(orderLabels).toEqual(["Needs you", "Idle", "Working", "Archived"]);
+  await expect(idleOrder).toBeFocused();
+  await page.keyboard.press("Alt+ArrowUp");
+  await expect.poll(orderLabels).toEqual(["Idle", "Needs you", "Working", "Archived"]);
+  await closeSidebarMenu(page);
+  await expect
+    .poll(async () => (await groupKeys()).filter((key) => /needs-you|idle/.test(key)))
+    .toEqual(["group:idle", "group:needs-you"]);
+  await expectFilterIndicator(true);
+  // The harness's Setup failed patch is in memory; the order is persisted.
+  await page.reload({ waitUntil: "networkidle" });
+  await openSidebarSubmenu(page, "Group");
+  await expect.poll(orderLabels).toEqual(["Idle", "Needs you", "Working", "Archived"]);
+  await page.getByRole("menu").last().getByRole("menuitem", { name: "Reset", exact: true }).click();
+  await expect(page.locator('[data-sidebar-group="group:needs-you"]')).toHaveCount(0);
+  await closeSidebarMenu(page);
+  check(
+    "Group order and hiding persist per grouping, keep the open workspace and leave the menu open",
     true,
   );
 
@@ -105,28 +148,6 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await zeros.click();
   await expect(zeros).toHaveAttribute("aria-checked", "true");
   await expectFilterIndicator(true);
-  const originalTheme = await page.evaluate(
-    () => document.documentElement.dataset.theme,
-  );
-  for (const theme of ["dark", "light"]) {
-    await page.evaluate(
-      (value) => (document.documentElement.dataset.theme = value),
-      theme,
-    );
-    const colors = await indicator.evaluate((node) => {
-      const swatch = document.createElement("span");
-      swatch.style.backgroundColor = "var(--accent-text)";
-      document.body.append(swatch);
-      const expected = getComputedStyle(swatch).backgroundColor;
-      swatch.remove();
-      return { actual: getComputedStyle(node).backgroundColor, expected };
-    });
-    expect(colors.actual).toBe(colors.expected);
-  }
-  await page.evaluate((theme) => {
-    if (theme) document.documentElement.dataset.theme = theme;
-    else delete document.documentElement.dataset.theme;
-  }, originalTheme);
   await expect.poll(order).toEqual(["ws-boston", "ws-atlanta"]);
   const colors = page.getByRole("menuitemcheckbox", {
     name: "example/ocolors",
@@ -136,7 +157,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(colors).toHaveAttribute("aria-checked", "true");
   await expect(row("ws-seville")).toBeVisible();
   await expect(row("ws-paris-mumbai-city-docs")).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  await closeSidebarMenu(page);
   await page.reload({ waitUntil: "networkidle" });
   await expect(row("ws-atlanta")).toBeVisible();
   await expect(row("ws-seville")).toBeVisible();
@@ -172,6 +193,10 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
   await expect(group).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(
+    page.getByRole("menuitem", { name: /^Group by/ }),
+  ).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(
     page.getByRole("menuitemradio", { name: "Repository", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("ArrowDown");
@@ -179,7 +204,9 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     page.getByRole("menuitemradio", { name: "Status", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.locator("[data-sidebar-status]")).toHaveCount(5);
+  await expect(page.locator('[data-sidebar-group="group:idle"]')).toBeVisible();
+  await expect(page.getByRole("menuitemradio", { name: "Status", exact: true })).toHaveAttribute("aria-checked", "true");
+  await closeSidebarMenu(page);
   check(
     "Clearing filters restores all repositories; hidden menus close and grouping is keyboard accessible",
     true,
@@ -245,8 +272,7 @@ export async function runSidebarWorkspaceFilters({ page, check, harnessBase }) {
     await placementItem.hover();
     await expect(placementItem).toHaveAttribute("data-state", "open");
     await page.getByRole("menuitemcheckbox", { name, exact: true }).click();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
+    await closeSidebarMenu(page);
   };
   await placement("Cloud");
   await expect(row(seeded.keys[0])).toHaveCount(0);

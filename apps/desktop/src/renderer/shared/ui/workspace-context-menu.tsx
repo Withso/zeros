@@ -1,6 +1,7 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, ShieldCheck, UserRoundCog } from "lucide-react";
+import { BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, ShieldCheck, UserRoundCog } from "lucide-react";
+import { ArchiveIcon } from "./archive-icon";
 import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 import { useCloudFolderSharedDocument } from "../../state/cloud-workspace-creators";
 import { setCloudWorkspaceKept, useCloudKeepDocument } from "../../state/cloud-retention";
@@ -238,7 +239,7 @@ export function WorkspaceContextMenu({
           <>
             <ContextMenuSeparator />
             <ContextMenuItem onSelect={onArchive} disabled={archiveInert}>
-              <Archive />
+              <ArchiveIcon />
               <span>Archive</span>
             </ContextMenuItem>
           </>

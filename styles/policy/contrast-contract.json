@@ -92,7 +92,8 @@
         "green-text",
         "yellow-text",
         "accent-text",
-        "violet-text"
+        "violet-text",
+        "orange-text"
       ],
       "on": [
         "@rest",

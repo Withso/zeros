@@ -6,6 +6,7 @@ import {
   closedChats,
   finishedChats,
   forgetChatUnread,
+  newestUnreadChatInFolder,
   noteChatsFinished,
   resetChatUnreadForTests,
   setChatsInView,
@@ -149,5 +150,23 @@ describe("chat unread state", () => {
     // Dropping out of the list (chats reloading) or a first load never prunes.
     expect(closedChats(chats(["a", "b"]), chats(["a"]))).toEqual([]);
     expect(closedChats([], chats(["a"], ["a"]))).toEqual([]);
+  });
+});
+
+describe("newestUnreadChatInFolder", () => {
+  const chats = [
+    { id: "old", folder: "/w", updatedAt: 1 },
+    { id: "new", folder: "/w", updatedAt: 5 },
+    { id: "gone", folder: "/w", updatedAt: 9, archived: true },
+    { id: "other", folder: "/x", updatedAt: 9 },
+  ];
+
+  it("picks the newest live unread chat in the folder", () => {
+    expect(newestUnreadChatInFolder(chats, "/w")).toBeNull();
+    noteChatsFinished(["old", "new", "gone", "other"]);
+    expect(newestUnreadChatInFolder(chats, "/w")).toBe("new");
+    setChatsInView(["new"]);
+    expect(newestUnreadChatInFolder(chats, "/w")).toBe("old");
+    expect(newestUnreadChatInFolder(chats, null)).toBeNull();
   });
 });

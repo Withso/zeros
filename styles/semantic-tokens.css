@@ -37,6 +37,11 @@
      primitives; Light keeps border2 (override below). */
   --composer-border: #323232;
 
+  /* An idle child or repository-grouped sidebar row keeps its lead slot with
+     a deliberately faint dot: it marks "nothing to report" and must not read
+     as a status. Decorative (aria-hidden), so no contrast floor applies. */
+  --sidebar-idle-dot: #333333;
+
   /* Pills by ground (P13). One pill set, tuned to the surface it sits on.
      These defaults are the agent chat and tool rows on bg1: bg2 on border2,
      hovering to bg2-hover on border3 (the edge stays because a hovered row,
@@ -166,6 +171,7 @@
 /* ── Light theme ── */
 [data-theme="light"] {
   --composer-border: var(--border2); /* #E4E0DC, the composer's existing Light edge */
+  --sidebar-idle-dot: #d4d4d4;
   --composer-tool-action-hover: hsl(from var(--accent-text) h s calc(l - 10));
   --agent-notice-action-hover: hsl(
     from var(--accent-on-bg) h s calc(l - 10)
