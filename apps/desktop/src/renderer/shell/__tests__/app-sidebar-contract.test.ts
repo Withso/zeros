@@ -528,6 +528,6 @@ describe("sidebar row lead semantics", () => {
     // remounting in another Status sub-group cannot lose the announcement.
     expect(ROW).not.toContain("leadAnnouncement");
     expect(SIDEBAR).toContain('<div className="sr-only" role="status" aria-live="polite" data-sidebar-status-announcer="">');
-    expect(SIDEBAR).toContain("sidebarStatusAnnouncement(announcedStatusesRef.current, rows)");
+    expect(SIDEBAR).toContain("const statusAnnouncement = useSidebarStatusAnnouncement(announcedRows);");
   });
 });

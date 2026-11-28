@@ -7,6 +7,8 @@
 // change by workspace id.
 // ============================================
 
+import { useEffect, useRef, useState } from "react";
+
 export interface SidebarStatusAnnouncementRow {
   id: string;
   label: string;
@@ -29,4 +31,24 @@ export function sidebarStatusAnnouncement(
     if (previous.get(row.id) !== row.status) changes.push(`${row.label}: ${row.status}`);
   }
   return { next, message: changes.length ? changes.join("; ") : null };
+}
+
+/** The region's text for these rows (null while the sidebar is hidden). Each
+ *  pass sets it, so a pass with no change clears it and a later change to the
+ *  same word is new text the screen reader announces again. Hidden passes
+ *  forget the baseline, so rows shown again are first sightings. */
+export function useSidebarStatusAnnouncement(rows: readonly SidebarStatusAnnouncementRow[] | null): string | null {
+  const seen = useRef(new Map<string, string | null>());
+  const [message, setMessage] = useState<string | null>(null);
+  useEffect(() => {
+    if (!rows) {
+      seen.current = new Map();
+      setMessage(null);
+      return;
+    }
+    const result = sidebarStatusAnnouncement(seen.current, rows);
+    seen.current = result.next;
+    setMessage(result.message);
+  }, [rows]);
+  return message;
 }

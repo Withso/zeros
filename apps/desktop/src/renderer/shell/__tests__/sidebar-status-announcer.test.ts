@@ -14,7 +14,7 @@ describe("the sidebar's status announcer", () => {
     expect(message).toBeNull();
     ({ next, message } = sidebarStatusAnnouncement(next, [{ id: "a", label: "atlas", status: "Needs input" }]));
     expect(message).toBe("atlas: Needs input");
-    ({ next, message } = sidebarStatusAnnouncement(next, [{ id: "a", label: "atlas", status: null }]));
+    ({ message } = sidebarStatusAnnouncement(next, [{ id: "a", label: "atlas", status: null }]));
     expect(message).toBeNull();
   });
 

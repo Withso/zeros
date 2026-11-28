@@ -61,7 +61,7 @@ import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-st
 import { useSharingOwners, useSharingSections } from "../state/cloud-workspace-creators";
 import { pullRequestTarget } from "../state/workspace-repositories";
 import { sidebarGroupingId, sidebarProjectionArgs } from "./sidebar-projection";
-import { sidebarStatusAnnouncement } from "./sidebar-status-announcer";
+import { useSidebarStatusAnnouncement } from "./sidebar-status-announcer";
 import { sidebarRowStatus } from "./sidebar-workspace-row-meta";
 import { getPrIslandKind, usePrIslandKindsVersion } from "./pr/pr-island-state-store";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
@@ -627,30 +627,20 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => new Set(realWorkspaces.flatMap(workspace => workspace.parentWorkspaceId ? [workspace.parentWorkspaceId] : [])),
     [realWorkspaces],
   );
-  const announcedStatusesRef = useRef(new Map<string, string | null>());
-  const [statusAnnouncement, setStatusAnnouncement] = useState<string | null>(null);
-  useEffect(() => {
-    if (hidden) {
-      announcedStatusesRef.current = new Map();
-      return;
-    }
-    const rows = navigableWorkspaces.flatMap(workspace => {
-      if (!parentIds.has(workspace.id)) return [];
-      const signal = signalOfWorkspace(workspace);
-      const status = sidebarRowStatus({
-        archiving: false,
-        setupFailed: !!signal.setupFailed,
-        cloudStatus: signal.cloudError ? "error" : null,
-        awaiting: signal.awaiting,
-        working: signal.working,
-        unread: signal.unread,
-      });
-      return [{ id: workspace.id, label: workspaceLabel(workspace), status: status?.label ?? null }];
+  const announcedRows = useMemo(() => hidden ? null : navigableWorkspaces.flatMap(workspace => {
+    if (!parentIds.has(workspace.id)) return [];
+    const signal = signalOfWorkspace(workspace);
+    const status = sidebarRowStatus({
+      archiving: false,
+      setupFailed: !!signal.setupFailed,
+      cloudStatus: signal.cloudError ? "error" : null,
+      awaiting: signal.awaiting,
+      working: signal.working,
+      unread: signal.unread,
     });
-    const { next, message } = sidebarStatusAnnouncement(announcedStatusesRef.current, rows);
-    announcedStatusesRef.current = next;
-    if (message) setStatusAnnouncement(message);
-  }, [hidden, navigableWorkspaces, parentIds, signalOfWorkspace]);
+    return [{ id: workspace.id, label: workspaceLabel(workspace), status: status?.label ?? null }];
+  }), [hidden, navigableWorkspaces, parentIds, signalOfWorkspace]);
+  const statusAnnouncement = useSidebarStatusAnnouncement(announcedRows);
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
   // Child workspaces under a collapsed parent stay history destinations,
