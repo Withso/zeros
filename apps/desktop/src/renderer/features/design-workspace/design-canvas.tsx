@@ -8734,7 +8734,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           // Runtime user color is an intentional canvas boundary.
           backgroundColor: canvasBackground,
           cursor: spacePressed ? undefined : designToolCursor(activeTool),
-          "--design-tool-cursor": designToolCursor(activeTool),
+          "--design-tool-cursor": spacePressed ? "grab" : designToolCursor(activeTool),
           "--design-radius-cursor": DESIGN_RADIUS_CURSOR,
         } as React.CSSProperties}
         onPointerDown={handleViewportPointerDown}

@@ -137,6 +137,17 @@ export async function runDesignCanvasCursorSmoke({ page, check }) {
     JSON.stringify(toolCursors),
   );
 
+  // Space is the hand tool under a drawing tool too, over a selection as well.
+  await page.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("r");
+  await page.keyboard.down("Space");
+  await settle();
+  const panning = await cursorAt(hero);
+  await page.keyboard.up("Space");
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[data-design-canvas-viewport][data-design-active-tool="select"]')).toHaveCount(1);
+  check("holding Space with a drawing tool shows the hand over a selection", panning === "keyword:grab", panning);
+
   await page.mouse.down();
   await page.mouse.move(hero.x + 24, hero.y + 12, { steps: 4 });
   const dragging = cursorKind(await page.evaluate(() => document.body.style.cursor));
