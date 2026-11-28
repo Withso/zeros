@@ -14,3 +14,13 @@ export function shouldFocusComposerForDesignActivation(
 ): boolean {
   return !composerRoot?.contains(activeElement);
 }
+
+export function activateComposerDesignMode(input: {
+  activeElement: Element | null;
+  composerEditor: Element | null;
+  focusComposer: () => void;
+  enterDesignMode: () => void;
+}): void {
+  if (shouldFocusComposerForDesignActivation(input.activeElement, input.composerEditor)) input.focusComposer();
+  input.enterDesignMode();
+}
