@@ -1935,6 +1935,10 @@ export function selectLiveDesignFrameFiles(input: {
   /** False during a camera gesture: explicit demand still applies, but a
    * passive frame waits for the rest instead of starting a document mid-zoom. */
   admitPassive?: boolean;
+  /** Frames already running a document. While `admitPassive` is false they
+   * stay ranked, so a gesture only holds back new documents: tearing down a
+   * running one mid-pan would also retire its high-resolution tile. */
+  running?: ReadonlySet<string>;
 }): ReadonlySet<string> {
   const limit = Math.max(1, Math.floor(input.maxLive));
   const ratio = input.devicePixelRatio && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
@@ -1950,7 +1954,10 @@ export function selectLiveDesignFrameFiles(input: {
   const centerY = worldTop + worldHeight / 2;
   const overscanX = worldWidth;
   const overscanY = worldHeight;
-  const ranked = input.admitPassive === false ? [] : input.frames
+  const rankable = input.admitPassive === false
+    ? input.frames.filter((frame) => input.running?.has(frame.file) === true)
+    : input.frames;
+  const ranked = rankable
     .map((frame) => {
       const near =
         frame.x + frame.width >= worldLeft - overscanX &&
