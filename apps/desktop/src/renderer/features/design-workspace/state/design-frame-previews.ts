@@ -386,6 +386,8 @@ export class DesignFramePreviews {
   private changeTimer: unknown = null;
   private demandToken: object | null = null;
   private demand: DesignPreviewDemand | null = null;
+  private deferredDemand: { token: object; demand: DesignPreviewDemand } | null = null;
+  private deferredDemandTimer: unknown = null;
   /** Retiring or replacing the owning canvas invalidates pending work even
    * if it returns to the same owner and generation before that work ends. */
   private productionEpoch = 0;
@@ -557,16 +559,32 @@ export class DesignFramePreviews {
    * the current demand clears it (hidden, unmounted or another owner). */
   setDemand(token: object, demand: DesignPreviewDemand | null): void {
     if (!demand) {
+      if (this.deferredDemand?.token === token) this.clearDeferredDemand();
       if (this.demandToken !== token) return;
       this.clearDemand();
       return;
     }
     const changed = this.demandToken !== token || !sameDemand(this.demand, demand);
+    if (!changed) {
+      // Returning to the active demand before a deferred zoom replacement
+      // publishes cancels that replacement instead of resurrecting it.
+      if (this.deferredDemand?.token === token) this.clearDeferredDemand();
+      return;
+    }
+    const replacing = this.demandToken === token && this.demand !== null &&
+      sameOwner(this.demand.owner, demand.owner) && this.demand.theme === demand.theme;
+    if (replacing && (this.deps.quietMs?.() ?? 0) > 0) {
+      if (!(this.deferredDemand?.token === token && sameDemand(this.deferredDemand.demand, demand))) {
+        this.deferredDemand = { token, demand };
+        this.scheduleDeferredDemand();
+      }
+      return;
+    }
+    this.clearDeferredDemand();
     if (this.demandToken !== token || !this.demand ||
       !sameOwner(this.demand.owner, demand.owner) || this.demand.theme !== demand.theme)
       this.productionEpoch++;
     this.demandToken = token;
-    if (!changed) return;
     const now = this.deps.now();
     for (const item of demand.items) {
       const key = designPreviewKey({ owner: demand.owner, theme: demand.theme, ...item });
@@ -582,7 +600,31 @@ export class DesignFramePreviews {
     this.pump();
   }
 
+  private scheduleDeferredDemand(): void {
+    if (this.deferredDemandTimer !== null) return;
+    const quiet = this.deps.quietMs?.() ?? 0;
+    if (quiet <= 0) return;
+    this.deferredDemandTimer = this.deps.setTimer(() => {
+      this.deferredDemandTimer = null;
+      const deferred = this.deferredDemand;
+      if (!deferred) return;
+      if ((this.deps.quietMs?.() ?? 0) > 0) {
+        this.scheduleDeferredDemand();
+        return;
+      }
+      this.deferredDemand = null;
+      this.setDemand(deferred.token, deferred.demand);
+    }, quiet);
+  }
+
+  private clearDeferredDemand(): void {
+    this.deferredDemand = null;
+    if (this.deferredDemandTimer !== null) this.deps.clearTimer(this.deferredDemandTimer);
+    this.deferredDemandTimer = null;
+  }
+
   private clearDemand(): void {
+    this.clearDeferredDemand();
     this.productionEpoch++;
     this.demandToken = null;
     this.demand = null;
