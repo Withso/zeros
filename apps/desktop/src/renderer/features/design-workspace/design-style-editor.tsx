@@ -91,6 +91,7 @@ interface DesignStyleEditorProps {
   ) => React.ReactNode;
   onLayoutAction: (action: DesignLayoutAction) => Promise<void>;
   frameSelected?: boolean;
+  componentMainSelected?: boolean;
   /** Every selected layer whose details are loaded. */
   layoutParents?: readonly DesignRuntimeNodeDetails[];
   /** How many layers are selected, loaded or not. */
@@ -238,6 +239,7 @@ export function DesignStyleEditor({
   onCommitStyles,
   onLayoutAction,
   frameSelected,
+  componentMainSelected,
   layoutParents,
   selectionCount = 1,
   motionTimelineOpen = false,
@@ -394,6 +396,7 @@ export function DesignStyleEditor({
           disabled={disabled}
           active={active}
           frameSelected={frameSelected}
+          componentMainSelected={componentMainSelected}
           layoutParents={layoutParents}
           selectionCount={selectionCount}
           onCommit={(styles) => commit(styles, "size")}
@@ -443,6 +446,7 @@ export function DesignStyleEditor({
           disabled={disabled}
           active={active}
           frameSelected={frameSelected}
+          componentMainSelected={componentMainSelected}
           layoutParents={layoutParents}
           selectionCount={selectionCount}
           onCommit={(styles) => commit(styles, "layout")}
