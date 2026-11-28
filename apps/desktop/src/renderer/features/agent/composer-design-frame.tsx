@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Camera, Frame, X } from "lucide-react";
 import type { ComposerMode } from "@zeros/protocol/composer-mode";
@@ -73,15 +73,6 @@ export function useComposerDesignFrame(options: {
     }
     onPin(Array.isArray(target) ? saved : saved[0]);
   }, [onPin, workspaceId]);
-  const currentEvent = selectionEvent(workspaceId);
-  useEffect(() => {
-    if (!options.active || pinned.target !== null || !workspaceId) return;
-    if (pinned.event === null) {
-      const next = { ...pinned, event: currentEvent };
-      pinnedRef.current = next;
-      setPinned(next);
-    } else if (pinned.event !== currentEvent) pin(undefined);
-  }, [options.active, workspaceId, pinned, currentEvent, pin]);
   const liveSelection = useMemo<DesignFrameAttachmentSelection | null>(() => {
     if (!workspaceId || !workspace) return null;
     const [directoryId, storedPageId, ownerRevision, event, selectedTargets] = JSON.parse(selectedKey) as [string | null, string | null, number | null, number | null, DesignSelectionTarget[] | null];
@@ -100,27 +91,13 @@ export function useComposerDesignFrame(options: {
   const pinBelongsHere = pinnedTargets.every(target => target.workspaceId === workspace?.id &&
     (target.organizationId === undefined || target.organizationId === (workspace.organizationId ?? null)) &&
     (target.placement === undefined || target.placement === (workspace.placement ?? "local")));
-  const selection = !options.active ? null : pinned.target ? pinBelongsHere ? pinned.target : null :
-    pinned.target === null && (pinned.event === null || pinned.event === currentEvent) ? null : liveSelection;
+  const selection = !options.active || !pinned.target || !pinBelongsHere ? null : pinned.target;
   const remove = useCallback(() => {
     if (selection) clearLinkedSelection(selection);
     pin(null);
   }, [selection, pin]);
-  const capture = useCallback((): DesignFrameAttachmentSelection | null => {
-    const parked = pinnedRef.current;
-    if (parked.target) {
-      const targets = designFrameAttachmentTargets(parked.target);
-      const currentWorkspace = findWorkspaceForFolder(options.cwd, project ? peekWorkspacesFor(project.repoSlug) ?? [] : []);
-      if (!currentWorkspace || targets.some(target => target.workspaceId !== currentWorkspace.id ||
-        isCloudWorkspace(target.workspaceId) !== (currentWorkspace.placement === "cloud") ||
-        (target.organizationId !== undefined && target.organizationId !== (currentWorkspace.organizationId ?? null)) ||
-        (target.placement !== undefined && target.placement !== (currentWorkspace.placement ?? "local"))))
-        throw new Error("The attached frame belongs to another workspace. Return to that workspace or remove the frame context before sending.");
-      const view = designWorkspaceView(currentWorkspace.id);
-      captureLink.current = { workspaceId: currentWorkspace.id, event: view.selectionEvent, revision: view.ownerRevision ?? 0 };
-      return Array.isArray(parked.target) ? targets : targets[0];
-    }
-    if (!options.active || (parked.target === null && (parked.event === null || parked.event === selectionEvent(workspaceId)))) return null;
+  const captureCurrentSelection = useCallback((): DesignFrameAttachmentSelection | null => {
+    if (!options.active) return null;
     const view = designWorkspaceView(workspaceId);
     if (!workspaceId || !workspace || !view.directoryId || !view.selectedTargets.length) return null;
     captureLink.current = { workspaceId, event: view.selectionEvent, revision: view.ownerRevision ?? 0 };
@@ -135,7 +112,26 @@ export function useComposerDesignFrame(options: {
       };
     });
     return targets.length === 1 ? targets[0] : targets;
-  }, [workspaceId, workspace, options.active, options.cwd, options.intent, project, includeScreenshot]);
+  }, [workspaceId, workspace, options.active, options.intent, includeScreenshot]);
+  const capture = useCallback((): DesignFrameAttachmentSelection | null => {
+    const parked = pinnedRef.current;
+    if (!parked.target) return null;
+    const targets = designFrameAttachmentTargets(parked.target);
+    const currentWorkspace = findWorkspaceForFolder(options.cwd, project ? peekWorkspacesFor(project.repoSlug) ?? [] : []);
+    if (!currentWorkspace || targets.some(target => target.workspaceId !== currentWorkspace.id ||
+      isCloudWorkspace(target.workspaceId) !== (currentWorkspace.placement === "cloud") ||
+      (target.organizationId !== undefined && target.organizationId !== (currentWorkspace.organizationId ?? null)) ||
+      (target.placement !== undefined && target.placement !== (currentWorkspace.placement ?? "local"))))
+      throw new Error("The attached frame belongs to another workspace. Return to that workspace or remove the frame context before sending.");
+    const view = designWorkspaceView(currentWorkspace.id);
+    captureLink.current = { workspaceId: currentWorkspace.id, event: view.selectionEvent, revision: view.ownerRevision ?? 0 };
+    return Array.isArray(parked.target) ? targets : targets[0];
+  }, [options.cwd, project]);
+  const attach = useCallback((): DesignFrameAttachmentSelection | null => {
+    const target = captureCurrentSelection();
+    if (target) pin(target);
+    return target;
+  }, [captureCurrentSelection, pin]);
   const consume = useCallback((submitted: DesignFrameAttachmentSelection | null) => {
     if (!submitted) return;
     const linked = captureLink.current;
@@ -156,7 +152,7 @@ export function useComposerDesignFrame(options: {
       pin(Array.isArray(pinnedRef.current.target) ? targets : targets[0]);
     } else setIncludeScreenshot(value => !value);
   }, [pin]);
-  return { selection, hasContext: hasDesignFrameAttachmentSelection(selection || (!options.active && pinned.target)), remove, capture, pin, consume, clear, toggleScreenshot };
+  return { selection, canAttach: hasDesignFrameAttachmentSelection(liveSelection), hasContext: hasDesignFrameAttachmentSelection(selection || (!options.active && pinned.target)), remove, capture, attach, pin, consume, clear, toggleScreenshot };
 }
 
 export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }: {
