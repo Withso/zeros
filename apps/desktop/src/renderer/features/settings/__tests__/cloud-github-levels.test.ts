@@ -248,9 +248,9 @@ describe("GitHub at two levels in Settings", () => {
 
   it("opens a connection's drawer with every repository it can read and the projects using each, with no add step", async () => {
     fixtures.connections = { organization: [connection("77777777-7777-4777-8777-777777777777", "withso", "organization", "active", 900)], personal: [], solo: false };
-    fixtures.drawer = { repositories: [{ id: "42", repository: "withso/zeros", defaultBranch: "main", private: true,
+    fixtures.drawer = { repositories: [{ id: "42", repository: "withso/zeros", defaultBranch: "main", private: true, access: "write",
       projects: [{ id: "88888888-8888-4888-8888-888888888881", name: "zeros" }] },
-      { id: "43", repository: "withso/web", defaultBranch: "main", private: false, projects: [] }] };
+      { id: "43", repository: "withso/web", defaultBranch: "main", private: false, access: "read", projects: [] }] };
     await page("drawer-member", false);
     await click("View @withso");
     expect([...document.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(["General", "Repositories"]);
@@ -268,6 +268,8 @@ describe("GitHub at two levels in Settings", () => {
     expect(drawer).toContain("withso/zeros");
     expect(drawer).toContain("withso/web");
     expect(drawer).toContain("In zeros");
+    expect(drawer).toContain("Private · Write access");
+    expect(drawer).toContain("Public · Read access");
     expect([...document.body.querySelectorAll("button")].map(node => node.textContent)).not.toContain("Add to cloud");
   });
 

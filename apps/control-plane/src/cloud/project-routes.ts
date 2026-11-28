@@ -26,7 +26,7 @@ export type ProjectRouteDeps = {
   visibleInstallations(organizationId: string, userId: string): Promise<{ installationId: number; accountLogin: string; accountType?: "User" | "Organization"; suspended: boolean }[]>;
   /** Repositories the caller can read through one installation, a page at a time. */
   installationRepositories(organizationId: string, userId: string, installationId: number, page: number):
-    Promise<{ repositories: { id: string; repository: string; defaultBranch: string; private: boolean }[]; nextPage: number | null }>;
+    Promise<{ repositories: { id: string; repository: string; defaultBranch: string; private: boolean; access?: "write" | "read" | "unavailable" }[]; nextPage: number | null }>;
   /** Renews the caller's check of these repositories, so a create seconds later reuses it. */
   warm?(organizationId: string, userId: string, targets: readonly { repository: string; repositoryId: string }[]): Promise<void>;
   /** The caller's GitHub reading one repository: its immutable ID. */

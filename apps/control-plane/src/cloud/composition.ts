@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { githubRepositoryAccess } from "./github-repository-access.js";
 import { otherRepositories, lifecycleCheckouts, workerRepositories, workspaceTokenSource, type WorkerRepositoryConfig } from "./workspace-repositories.js";
 import { repositorySetupReports } from "./workspace-repository-setup.js";
 import { resolveWorkspaceMcpServers } from "./workspace-repository-mcp.js";
@@ -211,7 +212,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const InstallationsPage = z.object({ installations: z.array(z.object({ id: z.number().int().positive(), app_id: z.number().int(),
     account: z.object({ login: z.string().max(100), type: z.string().max(40).optional() }), suspended_at: z.string().nullable().optional() }).passthrough()).max(100) }).passthrough();
   const InstallationRepositoriesPage = z.object({ repositories: z.array(z.object({ id: z.number().int().positive(), full_name: z.string().max(201),
-    default_branch: z.string().max(512), private: z.boolean() }).passthrough()).max(100) }).passthrough();
+    default_branch: z.string().max(512), private: z.boolean(),
+    permissions: z.object({ admin: z.boolean(), maintain: z.boolean(), push: z.boolean(), pull: z.boolean() }).partial().optional() }).passthrough()).max(100) }).passthrough();
   const projectRoutes = repositoryLevels && projects ? {
     levels: repositoryLevels,
     projects,
@@ -240,7 +242,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     installationRepositories: async (organizationId: string, userId: string, installationId: number, page: number) => {
       const http = (await memberGithub(organizationId, userId)).api.http;
       const rows = (await http.json(`/user/installations/${installationId}/repositories?per_page=100&page=${page}`, InstallationRepositoriesPage)).repositories;
-      return { repositories: rows.map(row => ({ id: String(row.id), repository: row.full_name, defaultBranch: row.default_branch, private: row.private })),
+      return { repositories: rows.map(row => ({ id: String(row.id), repository: row.full_name, defaultBranch: row.default_branch, private: row.private,
+        access: githubRepositoryAccess(row.permissions) })),
         nextPage: rows.length === 100 && page < 100 ? page + 1 : null };
     },
     ...(readyCopies && readyCopySecrets ? { readyCopies: { copies: readyCopies, secrets: readyCopySecrets,

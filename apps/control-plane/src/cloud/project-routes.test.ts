@@ -283,8 +283,8 @@ describe("GitHub connections and projects", () => {
         update: vi.fn(async (_o: string, caller: string, id: string) => ({ project: view(caller).find(row => row.id === id)!, change: "repositories_changed" })),
       },
       visibleInstallation: vi.fn(async () => ({ accountLogin: "withso", suspended: true })),
-      installationRepositories: vi.fn(async () => ({ repositories: [{ id: "42", repository: "withso/zeros", defaultBranch: "main", private: true },
-        { id: "43", repository: "withso/web", defaultBranch: "main", private: false }], nextPage: null })),
+      installationRepositories: vi.fn(async () => ({ repositories: [{ id: "42", repository: "withso/zeros", defaultBranch: "main", private: true, access: "write" },
+        { id: "43", repository: "withso/web", defaultBranch: "main", private: false, access: "read" }], nextPage: null })),
       resolveMemberRepository: vi.fn(async (_o: string, _u: string, repository: string) => ({ repository: repository.toLowerCase(), repositoryId: "44" })),
       readyCopies: {
         copies: { history: vi.fn(async () => history), retryState: vi.fn(async () => ({ failures: 1, nextAt: new Date("2026-11-21T11:05:00Z"), allowed: false })),
@@ -326,6 +326,8 @@ describe("GitHub connections and projects", () => {
     expect(drawer.repositories.map((row: { repository: string; projects: unknown[] }) => [row.repository, row.projects]))
       .toEqual([["withso/zeros", [{ id: P1, name: "zeros" }]], ["withso/web", []]]);
     expect(f.deps.projects.usedBy).toHaveBeenCalledWith(org, alice, ["42", "43"]);
+    // The caller's own access, for display only.
+    expect(drawer.repositories.map((row: { access?: string }) => row.access)).toEqual(["write", "read"]);
     for (const [route, method] of [["/cloud-repositories", "POST"], ["/cloud-repositories", "GET"], ["/cloud-repositories/ready-copy?repository=withso/zeros", "GET"]] as const)
       expect((await f.send(route, method, method === "POST" ? { repository: "withso/web", level: "shared" } : undefined)).status).toBe(404);
   });
