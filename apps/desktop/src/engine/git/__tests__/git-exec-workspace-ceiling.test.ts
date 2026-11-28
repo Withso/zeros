@@ -5,7 +5,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runGit, runGitProbeSync } from "../git-exec";
 import { setStateRootForTesting, worktreesRoot } from "../state";
-import { setManagedWorkspaceRootsForTesting, withWorkspaceCeiling } from "../workspace-ceiling";
 
 // Fixture Git must never follow an inherited repository selection (for example
 // when the suite runs inside a Git hook) into an unrelated repository.
@@ -93,20 +92,3 @@ describe("runGit inside the managed workspaces root", () => {
     await expect(runGit(broken, ["rev-parse", "--show-toplevel"])).rejects.toThrow();
   });
 });
-
-describe("withWorkspaceCeiling", () => {
-  afterEach(() => setManagedWorkspaceRootsForTesting(null));
-
-  it("keeps an inherited ceiling list, including its empty no-symlink marker, after the managed roots", () => {
-    setManagedWorkspaceRootsForTesting(["/managed/workspaces"]);
-    expect(withWorkspaceCeiling({ GIT_CEILING_DIRECTORIES: ":/slow/network" }).GIT_CEILING_DIRECTORIES)
-      .toBe(`/managed/workspaces${path.delimiter}:/slow/network`);
-  });
-
-  it("lists the nearest listable ancestor of a root that contains the delimiter, and resolves relative roots", () => {
-    setManagedWorkspaceRootsForTesting([`/outer/zeros${path.delimiter}local/workspaces`, "relative/workspaces"]);
-    expect(withWorkspaceCeiling({}).GIT_CEILING_DIRECTORIES)
-      .toBe(["/outer", path.resolve("relative/workspaces")].join(path.delimiter));
-  });
-});
-

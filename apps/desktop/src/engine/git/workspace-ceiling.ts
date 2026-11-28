@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import {
   zerosDesignWorkspacesRoot,
@@ -28,11 +29,37 @@ export function setManagedWorkspaceRootsForTesting(
   rootsOverride = roots;
 }
 
+function canonical(dir: string): string {
+  let current = path.resolve(dir);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return tail.length ? path.join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(dir);
+      tail.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function within(dir: string, root: string): boolean {
+  const relative = path.relative(canonical(root), canonical(dir));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 /** Git splits the ceiling list on the path delimiter, so a root that contains
- * it cannot be listed as is. Its deepest ancestor that can be listed still
- * stops discovery before any repository enclosing the root. */
-function listableCeiling(root: string): string | null {
-  let dir = path.resolve(root);
+ * it cannot be listed as is. For a Git call inside that root, its deepest
+ * listable ancestor still stops discovery before any enclosing repository.
+ * Calls elsewhere get no such ancestor, so a repository rooted there keeps
+ * resolving from its own subfolders. */
+function ceilingFor(root: string, cwd: string | undefined): string | null {
+  const resolved = path.resolve(root);
+  if (!resolved.includes(path.delimiter)) return resolved;
+  if (!cwd || !within(cwd, resolved)) return null;
+  let dir = resolved;
   while (dir.includes(path.delimiter)) {
     const parent = path.dirname(dir);
     if (parent === dir) return null;
@@ -46,10 +73,10 @@ function listableCeiling(root: string): string | null {
  * it. Repositories outside the roots, and healthy checkouts below them, resolve
  * as before. An inherited ceiling list is kept byte for byte after the managed
  * roots: its empty-entry marker only stops symlink resolution for the entries
- * that follow it. */
-export function withWorkspaceCeiling(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+ * that follow it. `cwd` is the Git call's working directory. */
+export function withWorkspaceCeiling(env: NodeJS.ProcessEnv, cwd?: string): NodeJS.ProcessEnv {
   const roots = [...new Set(managedWorkspaceRoots().flatMap((root) => {
-    const ceiling = listableCeiling(root);
+    const ceiling = ceilingFor(root, cwd);
     return ceiling ? [ceiling] : [];
   }))];
   if (roots.length === 0) return env;
