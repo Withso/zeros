@@ -525,6 +525,9 @@ describe("sidebar row lead semantics", () => {
   // toggle; the loader or dot it carries is announced beside it instead.
   it("announces a parent row's loader or dot outside its child toggle", () => {
     expect(ROW).toContain("const leadAnnouncement =");
-    expect(ROW).toMatch(/\{parentToggle && leadAnnouncement && \(\s*<span className="sr-only" role="status">\{leadAnnouncement\}<\/span>/);
+    // The live region stays mounted with the toggle; only its text changes,
+    // so the change from idle to Working is announced.
+    expect(ROW).toContain('{parentToggle && <span className="sr-only" role="status">{leadAnnouncement}</span>}');
+    expect(ROW).not.toMatch(/parentToggle && leadAnnouncement &&/);
   });
 });

@@ -478,9 +478,9 @@ export function SidebarWorkspaceRow({
               {leadMark}
             </span>
           )}
-          {parentToggle && leadAnnouncement && (
-            <span className="sr-only" role="status">{leadAnnouncement}</span>
-          )}
+          {/* Mounted with the toggle and only its text changes, so a screen
+              reader hears the change from idle to Working. */}
+          {parentToggle && <span className="sr-only" role="status">{leadAnnouncement}</span>}
         </ActivityScope.Provider>
         <span className={twoLine ? "flex min-w-0 flex-1 flex-col gap-0.5" : "contents"}>
         <span className={twoLine ? "flex h-4.5 min-w-0 items-center gap-2" : "contents"}>

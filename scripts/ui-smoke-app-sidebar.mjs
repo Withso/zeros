@@ -265,17 +265,46 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     .locator('[data-workspace-tab="true"]:not([data-active="true"]) [data-sidebar-row-logo]')
     .first();
   const before = await state();
+  const logoRowId = await logo.evaluate((node) => node.closest("[data-workspace-id]").dataset.workspaceId);
+  // Record every hover card that opens from here on, however briefly.
+  await page.evaluate(() => {
+    window.__openedPreviews = [];
+    window.__previewRecorder = new MutationObserver(() => {
+      for (const node of document.querySelectorAll("[data-workspace-preview]")) {
+        const id = node.dataset.workspacePreview;
+        if (!window.__openedPreviews.includes(id)) window.__openedPreviews.push(id);
+      }
+    });
+    window.__previewRecorder.observe(document.body, { childList: true, subtree: true });
+  });
   await logo.click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Repository Settings", exact: true }).click();
+  // Leave the row, then come back in through the menu: React reports that as
+  // entering the row (the menu is its portalled child), as well as the focus.
+  const repositorySettings = page.getByRole("menuitem", { name: "Repository Settings", exact: true });
+  await moveAway();
+  await repositorySettings.hover();
+  await repositorySettings.click();
   // Wait for the menu's click to settle; a bubbled row click would open that
   // row's workspace and move the folder after the repository page appears.
   await expect(page.getByRole("menu")).toHaveCount(0);
   await expect.poll(async () => (await state()).page).toBe("repo");
   expect((await state()).folder).toBe(before.folder);
-  // Pointer entry and focus inside the portalled menu must not have scheduled
-  // the row's hover card: with the pointer parked, none opens after its delay.
+  // Pointer entry and focus inside the portalled menu must not schedule the
+  // row's hover card. Hovering another row schedules its card later than any
+  // timer the menu could have left, so once that card opens the window has
+  // passed; the recorder must have seen only that card.
   await moveAway();
-  await page.waitForTimeout(700);
+  const witnessId = await page
+    .locator(`[data-workspace-tab="true"]:not([data-workspace-id="${logoRowId}"])`)
+    .first()
+    .evaluate((node) => node.dataset.workspaceId);
+  await row(witnessId).hover();
+  await expect(page.locator(`[data-workspace-preview="${witnessId}"]`)).toBeVisible();
+  expect(await page.evaluate(() => {
+    window.__previewRecorder.disconnect();
+    return window.__openedPreviews;
+  })).toEqual([witnessId]);
+  await moveAway();
   await expect(page.locator("[data-workspace-preview]")).toHaveCount(0);
   await row("ws-atlanta")
     .getByRole("button", { name: /^Open workspace atlanta/ })
