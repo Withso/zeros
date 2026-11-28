@@ -164,8 +164,8 @@ describe("child frame insertion", () => {
     });
   });
 
-  it.each(["flex", "grid"])(
-    "adds a normal frame to %s without rewriting the parent's layout",
+  it.each(["flex", "inline-flex", "grid", "inline-grid"])(
+    "places a drawn frame at its previewed point inside %s",
     (display) => {
       const operations = designFrameInsertionOperations(
         { ...parent, styles: { ...parent.styles, display } },
@@ -173,18 +173,30 @@ describe("child frame insertion", () => {
         { x: 10, y: 20 },
         { x: 210, y: 220 },
       );
-      expect(operations).toHaveLength(1);
+      expect(operations).toHaveLength(2);
       expect(operations[0]).toMatchObject({
-        type: "node.set-html",
+        type: "node.set-styles",
         nodeId: "parent",
+        styles: { position: "relative" },
       });
-      const insertion = operations[0];
+      const insertion = operations[1];
       if (insertion?.type !== "node.set-html")
         throw new Error("Missing insertion");
+      expect(insertion).toMatchObject({ nodeId: "parent", mode: "append" });
       expect(insertion.html).toContain(
-        "display:block;position:relative;width:100px;height:100px;",
+        "display:block;position:absolute;left:0px;top:0px;width:100px;height:100px;",
       );
-      expect(insertion.html).not.toContain("left:");
     },
   );
+
+  it("does not rewrite an already positioned flex parent", () => {
+    const operations = designFrameInsertionOperations(
+      { ...parent, styles: { ...parent.styles, display: "flex", position: "relative" } },
+      "child",
+      { x: 10, y: 20 },
+      { x: 210, y: 220 },
+    );
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({ type: "node.set-html", nodeId: "parent", mode: "append" });
+  });
 });

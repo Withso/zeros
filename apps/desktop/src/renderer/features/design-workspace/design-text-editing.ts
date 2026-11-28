@@ -1,3 +1,5 @@
+import { designComponentSlotOf } from "@zeros/protocol/design-runtime";
+
 export interface DesignTextInsertionMarkup {
   nodeId: string;
   text: string;
@@ -5,10 +7,28 @@ export interface DesignTextInsertionMarkup {
   y: number;
   width?: number;
   height?: number;
-  /** Flow is the default inside flex/grid parents; absolute placement is an
-   * explicit opt-out equivalent to Figma's Ignore auto layout. */
+  /** Flow remains available to component-slot insertion; ordinary canvas text
+   * is positioned where the text editor painted it. */
   placement?: "absolute" | "flow";
   typography?: Record<string, string>;
+}
+
+export function designTextInsertionPlacement(
+  parent: { oid: string } | null | undefined,
+): "absolute" | "flow" {
+  return parent && designComponentSlotOf(parent.oid) !== null
+    ? "flow"
+    : "absolute";
+}
+
+export function designTextParentNeedsPosition(
+  parent: { styles?: Record<string, string> } | null | undefined,
+  placement: "absolute" | "flow",
+): boolean {
+  return (
+    placement === "absolute" &&
+    (!parent?.styles?.position || parent.styles.position === "static")
+  );
 }
 
 const typeProperties = { fontFamily: "font-family", fontSize: "font-size", fontWeight: "font-weight",

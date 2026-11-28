@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createDesignTextMarkup, DESIGN_NEW_TEXT_FONT, designNewTextTypography } from "../design-text-editing";
+import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
+import { createDesignTextMarkup, DESIGN_NEW_TEXT_FONT, designNewTextTypography, designTextInsertionPlacement, designTextParentNeedsPosition } from "../design-text-editing";
 
 describe("design text insertion", () => {
   it("never starts a label in the browser's Times fallback", () => {
@@ -56,7 +57,7 @@ describe("design text insertion", () => {
     ).toThrow(/node id/i);
   });
 
-  it("keeps text inserted into flex and grid parents in document flow", () => {
+  it("keeps only component-slot text insertion in document flow", () => {
     const markup = createDesignTextMarkup({
       nodeId: "text-flow",
       text: "Flow with the layout",
@@ -69,6 +70,33 @@ describe("design text insertion", () => {
     expect(markup).not.toContain("position:absolute");
     expect(markup).not.toContain("left:80px");
     expect(markup).not.toContain("top:120px");
+  });
+
+  it.each(["flex", "inline-flex", "grid", "inline-grid"])(
+    "places newly typed text at its previewed point inside %s",
+    (display) => {
+      const parent = { oid: "parent", styles: { display, position: "static" } };
+      const placement = designTextInsertionPlacement(parent);
+      expect(placement).toBe("absolute");
+      expect(designTextParentNeedsPosition(parent, placement)).toBe(true);
+    },
+  );
+
+  it("does not rewrite an already positioned flex parent", () => {
+    const parent = { oid: "parent", styles: { display: "flex", position: "relative" } };
+    const placement = designTextInsertionPlacement(parent);
+    expect(placement).toBe("absolute");
+    expect(designTextParentNeedsPosition(parent, placement)).toBe(false);
+  });
+
+  it("preserves component-slot flow insertion", () => {
+    const parent = {
+      oid: designComponentSlotNodeId("component", "content"),
+      styles: { display: "flex", position: "static" },
+    };
+    const placement = designTextInsertionPlacement(parent);
+    expect(placement).toBe("flow");
+    expect(designTextParentNeedsPosition(parent, placement)).toBe(false);
   });
 
   it("bounds fixed boxes and rejects non-finite or oversized authoring input", () => {

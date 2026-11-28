@@ -233,6 +233,8 @@ import {
   designTextTypography,
   designTextTypographyProperties,
   createDesignTextNodeId,
+  designTextInsertionPlacement,
+  designTextParentNeedsPosition,
 } from "./design-text-editing";
 import { designClipboardFollowedFrame, designClipboardPasteAllowed } from "./design-clipboard";
 import { DesignThemeEditor } from "./design-theme-editor";
@@ -2247,23 +2249,64 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (!edit.frame || !edit.sourceVersion || !edit.parentNodeId) {
             throw new Error("The text insertion owner is no longer available.");
           }
-          const result = await appendDesignNodeHtmlCached(workspaceId, {
-            frame: edit.frame,
-            nodeId: edit.parentNodeId,
-            sourceVersion: edit.sourceVersion,
-            html: createDesignTextMarkup({
-              nodeId: edit.nodeId,
-              text: draft,
-              x: edit.x,
-              y: edit.y,
-              placement: edit.placement,
-              typography: edit.typography,
-              ...(edit.width === undefined
-                ? {}
-                : { width: edit.width, height: edit.height }),
-            }),
+          const html = createDesignTextMarkup({
+            nodeId: edit.nodeId,
+            text: draft,
+            x: edit.x,
+            y: edit.y,
+            placement: edit.placement,
+            typography: edit.typography,
+            ...(edit.width === undefined
+              ? {}
+              : { width: edit.width, height: edit.height }),
           });
-          const nextFrame = result.snapshot.frames.find(
+          const result = edit.parentNeedsPosition
+            ? await (async () => {
+                const key = designFoundationKey(
+                  workspaceId,
+                  edit.frame!,
+                  edit.sourceVersion!,
+                );
+                const foundation = await designFoundationCache.load(
+                  key,
+                  () => fetchDesignFoundation(key),
+                  { maxAgeMs: Number.POSITIVE_INFINITY },
+                );
+                return applyDesignTransactionCached(workspaceId, edit.frame!, {
+                  schemaVersion: 1,
+                  transactionId: `desktop:${crypto.randomUUID()}`,
+                  documentId: foundation.summary.documentId,
+                  baseRevision: foundation.summary.revision,
+                  actor: { kind: "human", id: "desktop" },
+                  intent: "Insert text",
+                  createdAt: Date.now(),
+                  operations: [
+                    {
+                      operationId: `container:${edit.nodeId}`,
+                      type: "node.set-styles",
+                      nodeId: edit.parentNodeId!,
+                      styles: { position: "relative" },
+                      scope: "auto",
+                      responsiveContext: "base",
+                      stateContext: "default",
+                    },
+                    {
+                      operationId: `insert:${edit.nodeId}`,
+                      type: "node.set-html",
+                      nodeId: edit.parentNodeId!,
+                      mode: "append",
+                      html,
+                    },
+                  ],
+                });
+              })()
+            : await appendDesignNodeHtmlCached(workspaceId, {
+                frame: edit.frame,
+                nodeId: edit.parentNodeId,
+                sourceVersion: edit.sourceVersion,
+                html,
+              });
+          const nextFrame = result.snapshot?.frames.find(
             (frame) => frame.file === edit.frame,
           );
           if (!nextFrame) {
@@ -7648,6 +7691,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           x: 0,
           y: 0,
           placement: "absolute",
+          parentNeedsPosition: false,
           typography,
           inheritedStyles: {
             color: DESIGN_CANVAS_DEFAULT_TEXT_COLOR,
@@ -7808,7 +7852,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           return;
         }
         const nodeId = createDesignTextNodeId();
-        const placement = layoutDisplay(parentDetails) ? "flow" : "absolute";
+        const placement = designTextInsertionPlacement(parentDetails);
+        const parentNeedsPosition = designTextParentNeedsPosition(parentDetails, placement);
         // Authored data-oid roots are positioned containers. Store coordinates
         // in that exact containing block while the gesture remains frame-local.
         const parentPoint = {
@@ -7843,6 +7888,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           y: parentPoint.y,
           ...(size ? size : {}),
           placement,
+          parentNeedsPosition,
           typography: newTypography,
           inheritedStyles: { ...(parentDetails?.styles ?? {
             color: DESIGN_CANVAS_DEFAULT_TEXT_COLOR,

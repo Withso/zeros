@@ -186,9 +186,7 @@ export function designFrameInsertion(
     throw new Error("The frame's drawable bounds are invalid.");
   // A slot's frame is the main's to style, so a layer drawn into one
   // joins its flow rather than asking it to be positioned.
-  const flow = designComponentSlotOf(parent.oid) !== null || ["flex", "inline-flex", "grid", "inline-grid"].includes(
-    parent.styles.display ?? "",
-  );
+  const flow = designComponentSlotOf(parent.oid) !== null;
   const operations: DesignOperation[] = [];
   const parentStyles =
     !flow && (!parent.styles.position || parent.styles.position === "static")

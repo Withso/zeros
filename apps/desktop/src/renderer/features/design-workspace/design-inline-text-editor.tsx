@@ -44,6 +44,7 @@ export interface NewInlineTextEdit extends InlineTextEditBase {
   width?: number;
   height?: number;
   placement: "absolute" | "flow";
+  parentNeedsPosition: boolean;
   /** Exact inherited runtime typography for an element that does not exist in
    * source yet. Canvas-owned text falls back to the same black system text the
    * generated document uses. */
