@@ -235,7 +235,6 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain('if (keyboardEvent.key !== "Escape") return;');
   });
 
-
   it("scopes tool and nudge shortcuts to the visible design surface", () => {
     expect(source).toContain("activeElement === document.body");
     expect(source).toContain("const arrowShortcut =");
@@ -249,7 +248,7 @@ describe("design workspace interaction wiring", () => {
   it("routes copy, duplicate, and delete through the active semantic selection", () => {
     expect(source).toContain("resolveDesignSelectionShortcut(");
     expect(source).toContain(
-      'activeElement.closest("[data-design-workspace-surface]")',
+      "activeElement.closest(DESIGN_KEYBOARD_SURFACE_SELECTOR)",
     );
     expect(source).toContain('document.execCommand("copy")');
     expect(source).toContain('window.addEventListener("paste", paste)');
