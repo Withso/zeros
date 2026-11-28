@@ -60,6 +60,7 @@ import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganizati
 import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-state";
 import { useSharingOwners, useSharingSections } from "../state/cloud-workspace-creators";
 import { pullRequestTarget } from "../state/workspace-repositories";
+import { sidebarGroupingId, sidebarProjectionArgs } from "./sidebar-projection";
 import { getPrIslandKind, usePrIslandKindsVersion } from "./pr/pr-island-state-store";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
@@ -155,7 +156,7 @@ import { SidebarGroupHeader } from "./sidebar-group-header";
 import { useCloudErrorWorkspaceIds } from "./sidebar-cloud-mark";
 import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { setupFailureShown, useSetupFailureAcknowledgements } from "../state/setup-failure-acknowledgements";
-import { useSidebarWorkspaceSignals } from "./use-sidebar-workspace-signals";
+import { sidebarChatIdsByWorkspace, useSidebarWorkspaceSignals } from "./use-sidebar-workspace-signals";
 import { SidebarArchivedSection } from "./sidebar-archived-section";
 import {
   ARCHIVED_STATUS_GROUP,
@@ -461,17 +462,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [allPendingCreates, accessibleWorkspaces],
   );
 
-  const chatIdsByWorkspace = useMemo(() => {
-    const liveChats = chats.filter((chat) => !chat.archived);
-    const ids = new Map<string, string[]>();
-    for (const workspace of realWorkspaces) ids.set(workspace.id, []);
-    for (const chat of liveChats) {
-      const workspace = findWorkspaceForFolder(chat.folder, realWorkspaces);
-      if (!workspace) continue;
-      ids.get(workspace.id)?.push(chat.id);
-    }
-    return ids;
-  }, [chats, realWorkspaces]);
+  const chatIdsByWorkspace = useMemo(() => sidebarChatIdsByWorkspace(chats, realWorkspaces), [chats, realWorkspaces]);
   const draftIdsByWorkspace = useMemo(
     () => draftChatIdsByWorkspace(chats, realWorkspaces),
     [chats, realWorkspaces],
@@ -528,57 +519,23 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   }, [prIslandVersion]);
   // What the list is grouped by: Repository (the persisted default), Status
   // and the other View-menu groupings, or None.
-  const groupingId: SidebarGroupingId | null = view.grouping ?? (listFilter === "grouped" ? "repository" : listFilter === "status" ? "status" : null);
+  const groupingId: SidebarGroupingId | null = sidebarGroupingId(view, listFilter);
   const keepWorkspaceId = useMemo(
     () => activePage === "workspace" && activeFolder ? (findWorkspaceForFolder(activeFolder, realWorkspaces)?.id ?? null) : null,
     [activeFolder, activePage, realWorkspaces],
   );
-  const viewArgs = useMemo(() => {
-    const label = (workspace: Workspace) => workspaceLabel(workspace);
-    const compare = sidebarWorkspaceComparator({
-      sort: preferences.sort,
-      direction: view.direction,
-      needsYouFirst: view.needsYouFirst,
-      label,
-      activeAt: (workspace) => activeAtByWorkspaceId.get(workspace.id),
-      needsYou: (workspace) => agentStatusOf(workspace, signalOfWorkspace(workspace)) === "needs-you",
-    });
-    const groupOf = (grouping: SidebarExtraGrouping | "status", item: SidebarWorkspaceItem) =>
-      item.kind === "pending"
-        ? pendingGroupOf(grouping, item.pending.placement === "cloud")
-        : extraGroupOf(grouping, item.workspace, {
-            signal: signalOfWorkspace(item.workspace),
-            activeAt: activeAtByWorkspaceId.get(item.workspace.id),
-            owner: ownerOf(item.workspace),
-            island: islandOf(item.workspace),
-          });
-    const grouping = groupingId === "repository" ? null : groupingId;
-    const thenBy = view.thenBy && view.thenBy !== groupingId && groupingId !== null ? view.thenBy : null;
-    const projectRank = new Map(projects.map((project, index) => [project.id, index]));
-    // Joined Local and cloud projects share one repository sub-group, as they
-    // share one header under Group › Repository.
-    const headOf = unifiedPlacements ? projectGroupLookup(projects) : null;
-    const repositoryOf = (project: Project) => headOf?.(project.id)?.[0] ?? project;
-    return {
-      compare,
-      hideEmptyGroups: view.hideEmptyGroups,
-      groupOrder: groupingId ? view.groupOrder[groupingId] : undefined,
-      hiddenGroups: groupingId ? view.hiddenGroups[groupingId] : undefined,
-      keepWorkspaceId,
-      ...(grouping ? { extraGroup: (item: SidebarWorkspaceItem) => groupOf(grouping, item) } : {}),
-      ...(thenBy
-        ? {
-            subGroup: (item: SidebarWorkspaceItem) =>
-              thenBy === "repository"
-                ? (() => {
-                    const project = repositoryOf(item.project);
-                    return { key: project.id, label: project.name, order: projectRank.get(project.id) ?? projects.length, project };
-                  })()
-                : groupOf(thenBy, item),
-          }
-        : {}),
-    };
-  }, [activeAtByWorkspaceId, groupingId, islandOf, keepWorkspaceId, ownerOf, preferences.sort, projects, signalOfWorkspace, view.direction, view.groupOrder, view.hiddenGroups, view.hideEmptyGroups, view.needsYouFirst, view.thenBy, unifiedPlacements]);
+  const viewArgs = useMemo(() => sidebarProjectionArgs({
+    view,
+    sort: preferences.sort,
+    groupingId,
+    projects,
+    unifiedPlacements,
+    signalOf: signalOfWorkspace,
+    activeAt: (workspace) => activeAtByWorkspaceId.get(workspace.id),
+    ownerOf,
+    islandOf,
+    keepWorkspaceId,
+  }), [activeAtByWorkspaceId, groupingId, islandOf, keepWorkspaceId, ownerOf, preferences.sort, projects, signalOfWorkspace, unifiedPlacements, view]);
   const menuCounts = useMemo(() => {
     const statuses = Object.fromEntries(SIDEBAR_AGENT_STATUS_FILTERS.map(status => [status, 0])) as Record<SidebarAgentStatusFilter, number>;
     const prStates = Object.fromEntries(SIDEBAR_PR_FILTERS.map(state => [state, 0])) as Record<SidebarPrFilter, number>;
