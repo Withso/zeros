@@ -536,7 +536,7 @@ describe("an inspector field scrub", () => {
     expect(runtime.measureLayout).not.toHaveBeenCalled();
   });
 
-  it("previews numeric arrow stepping immediately and commits once on keyup", async () => {
+  it("previews numeric arrow stepping immediately and commits once on Enter", async () => {
     const runtime = await showRuntime();
     const input = fieldInput("opacity");
     expect(input.value).toBe("50");
@@ -558,6 +558,11 @@ describe("an inspector field scrub", () => {
     expect(writes()).toBe(0);
     act(() => {
       input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(writes()).toBe(0);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
     await settle();
     expect(writes()).toBe(1);
@@ -603,25 +608,6 @@ describe("an inspector field scrub", () => {
     });
     await settle();
     expect(writes()).toBe(1);
-  });
-
-  it("commits separate arrow taps as separate edits", async () => {
-    await showRuntime();
-    const input = fieldInput("opacity");
-    act(() => input.focus());
-    for (let tap = 0; tap < 2; tap += 1) {
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
-      });
-      await settle();
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowUp", bubbles: true, cancelable: true }));
-      });
-      await settle();
-    }
-    expect(input.value).toBe("52");
-    expect(writes()).toBe(2);
-    expect(lastWrite()).toContain('"opacity":"0.52"');
   });
 
   it("does not measure confirmed layout during ordinary pointer position previews", async () => {

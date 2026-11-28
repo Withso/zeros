@@ -1099,14 +1099,6 @@ export function InspectorEditField({
               event.currentTarget.blur();
             }
           }}
-          onKeyUp={(event) => {
-            if (
-              (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
-              !arrowSequenceRef.current
-            ) return;
-            arrowSequenceRef.current = null;
-            void commitRef.current?.(draftRef.current);
-          }}
         />
         )}
         {suffix && !tokenShown ? <span className="zd-field-suffix">{suffix}</span> : null}
