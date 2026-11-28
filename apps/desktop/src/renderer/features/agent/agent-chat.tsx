@@ -464,6 +464,7 @@ function AgentChatBody({
   const submitRef = useRef<(recordActivity?: boolean) => void>(() => {});
   const updateLiveDraftRef = useRef<() => void>(() => {});
   const composerFocusRef = useRef<() => void>(() => {});
+  const composerEditorDomRef = useRef<HTMLElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerDockRef = useRef<HTMLDivElement>(null);
   const askPillRef = useRef<HTMLButtonElement>(null);
@@ -905,7 +906,7 @@ function AgentChatBody({
   const enterDesignMode = useCallback(() => changeComposerMode("design"), [changeComposerMode]);
   const leaveDesignMode = useCallback(() => changeComposerMode("code"), [changeComposerMode]);
   const activateDesignMode = useCallback(() => {
-    if (shouldFocusComposerForDesignActivation(document.activeElement, composerCardRef.current)) composerFocusRef.current();
+    if (shouldFocusComposerForDesignActivation(document.activeElement, composerEditorDomRef.current)) composerFocusRef.current();
     enterDesignMode();
   }, [enterDesignMode]);
   const designFrameContext = useComposerDesignFrame({
@@ -1978,6 +1979,7 @@ function AgentChatBody({
   const composerHasContent = !composerEmpty || designFrameContext.hasContext;
   const queuedEditHasContent = !composerEmpty || Boolean(editingQueuedId && cloudComputerV2 && isCloudWorkspace(chatThread?.folder) && session.getQueuedDraft?.(editingQueuedId)?.prepareAdditional);
   composerFocusRef.current = focusComposer;
+  composerEditorDomRef.current = (composerEditor?.view.dom as HTMLElement | undefined) ?? null;
   // The composer stays editable in every session state, because sending from a
   // failed chat is the retry. Only saved history is read-only.
   useEffect(() => {
