@@ -139,6 +139,7 @@ import {
 import {
   buildSidebarSharingSections,
   buildSidebarWorkspaceEntries,
+  sidebarSelectedProjectIds,
   rowsShownForPlacements,
   type SidebarWorkspaceEntry,
   sidebarItemSelectionKey,
@@ -595,7 +596,14 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     if (!groupingId) return null;
     const hiddenKeys = view.hiddenGroups[groupingId] ?? [];
     const order = view.groupOrder[groupingId];
-    const shown = filterSidebarWorkspaces(rowsShownForPlacements(realWorkspaces, hiddenPlacements), view, signalOfWorkspace, sharing ? ownerOf : undefined, islandOf);
+    // Count only what the list can show: the repository filter's scope too.
+    const selected = sidebarSelectedProjectIds(repositoryIds, unifiedPlacements ? projectGroupLookup(projects) : null);
+    const inScope = (workspace: Workspace) => {
+      if (selected.size === 0) return true;
+      const project = findProjectForFolder(workspace.repoRoot, projects);
+      return !!project && selected.has(project.id);
+    };
+    const shown = filterSidebarWorkspaces(rowsShownForPlacements(realWorkspaces, hiddenPlacements).filter(inScope), view, signalOfWorkspace, sharing ? ownerOf : undefined, islandOf);
     const counts = new Map<string, number>();
     const count = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
     if (groupingId === "repository") {

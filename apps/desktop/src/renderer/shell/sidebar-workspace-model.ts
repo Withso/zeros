@@ -265,6 +265,17 @@ export function buildSidebarWorkspaceEntries(args: {
     : entries;
 }
 
+/** The projects a repository filter selects; empty means no filter. Selecting
+ *  any side of a joined project selects the whole project. */
+export function sidebarSelectedProjectIds(
+  repositoryIds: readonly string[],
+  projectGroupOf?: ((projectId: string) => readonly { id: string }[] | undefined) | null,
+): Set<string> {
+  return new Set(projectGroupOf
+    ? repositoryIds.flatMap(id => projectGroupOf(id)?.map(project => project.id) ?? [id])
+    : repositoryIds);
+}
+
 /** The key the Group menu orders and hides a first-level entry by. */
 export function sidebarEntryGroupKey(entry: SidebarWorkspaceEntry): string | null {
   return entry.kind === "repository" ? entry.project.id : entry.kind === "group" ? entry.groupKey : null;
@@ -302,10 +313,7 @@ function buildEntries(args: Parameters<typeof buildSidebarWorkspaceEntries>[0]):
       .map(({ key, label, project, items: rows }) => ({ key, label, ...(project ? { project } : {}), items: nest(rows) }));
     return { items: subgroups.flatMap(group => group.items), subgroups };
   };
-  // Selecting any side of a joined project selects the whole project.
-  const selectedIds = new Set(projectGroupOf
-    ? (args.repositoryIds ?? []).flatMap(id => projectGroupOf(id)?.map(project => project.id) ?? [id])
-    : args.repositoryIds);
+  const selectedIds = sidebarSelectedProjectIds(args.repositoryIds ?? [], projectGroupOf);
   const projects = selectedIds.size
     ? args.projects.filter(project => selectedIds.has(project.id))
     : args.projects;

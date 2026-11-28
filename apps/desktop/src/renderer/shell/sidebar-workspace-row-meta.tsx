@@ -88,12 +88,14 @@ export function sidebarRowLead(args: {
   if (args.archiving) return "archiving";
   if (args.folder) return "folder";
   if (args.design) return "design";
-  if (args.dotLead) return args.working ? "working" : args.statusDot ? "status-dot" : "idle-dot";
+  // The mark follows the status word: a dot status outranks Working (another
+  // chat may work while one waits on the user), else the loader, else idle.
+  if (args.dotLead) return args.statusDot ? "status-dot" : args.working ? "working" : "idle-dot";
   return "logo";
 }
 
-/** The mark at the right end of line 1 (Compact: of the one line): the agent
- * loader, else the status dot. A dot lead already carries it, unless the row
+/** The mark at the right end of line 1 (Compact: of the one line): the status
+ * dot when its status outranks Working, else the agent loader. A dot lead already carries it, unless the row
  * keeps a folder or Design mark there. */
 export function sidebarRowEndMark(args: {
   archiving: boolean;
@@ -104,8 +106,8 @@ export function sidebarRowEndMark(args: {
   design?: boolean;
 }): "loader" | "dot" | null {
   if (args.archiving || (args.dotLead && !args.folder && !args.design)) return null;
-  if (args.working) return "loader";
-  return args.statusDot ? "dot" : null;
+  if (args.statusDot) return "dot";
+  return args.working ? "loader" : null;
 }
 
 /** Compact shows its time only when no loader or status dot speaks for it. */

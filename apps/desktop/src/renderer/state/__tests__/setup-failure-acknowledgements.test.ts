@@ -27,6 +27,16 @@ beforeEach(() => {
 const failed = (id: string) => ({ id, setupState: "failed" as const });
 
 describe("setup failure acknowledgements", () => {
+  // A read that omits setupState says nothing about setup: only a confirmed
+  // rerun (running), pass or stop retires an acknowledgement.
+  it("keeps an acknowledgement through an unknown setup state", () => {
+    acknowledgeSetupFailure("a");
+    reconcileSetupFailureAcknowledgements([{ id: "a" }, { id: "a", setupState: null }], () => false);
+    expect(setupFailureAcknowledged("a")).toBe(true);
+    reconcileSetupFailureAcknowledgements([{ id: "a", setupState: "stopped" }], () => false);
+    expect(setupFailureAcknowledged("a")).toBe(false);
+  });
+
   it("shows a failure until it is acknowledged", () => {
     expect(setupFailureShown(failed("a"), setupFailureAcknowledged("a"))).toBe(true);
     acknowledgeSetupFailure("a");

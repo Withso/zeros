@@ -68,6 +68,10 @@ export function setupFailureShown(
   return workspace.setupState === "failed" && !acknowledged;
 }
 
+// Confirmed states after a failure. An omitted or null state is unknown and
+// keeps the acknowledgement.
+const SETUP_MOVED_ON: ReadonlySet<string> = new Set(["running", "passed", "stopped"]);
+
 /** Reconcile acknowledgements with what the workspaces and their chats now
  *  say: an acknowledgement outlives the failure it answered, and a running
  *  agent or any other status acknowledges a failure on its own. */
@@ -79,9 +83,9 @@ export function reconcileSetupFailureAcknowledgements(
   let next: string[] | null = null;
   for (const workspace of workspaces) {
     const has = acknowledged.has(workspace.id);
-    if (workspace.setupState !== "failed") {
+    if (SETUP_MOVED_ON.has(workspace.setupState ?? "")) {
       if (has) (next ??= [...acknowledged]).splice(next.indexOf(workspace.id), 1);
-    } else if (!has && movedOn(workspace.id)) {
+    } else if (workspace.setupState === "failed" && !has && movedOn(workspace.id)) {
       (next ??= [...acknowledged]).push(workspace.id);
     }
   }

@@ -466,8 +466,9 @@ export function SidebarWorkspaceRow({
               <ChevronRight className={cn("hidden size-3.5 text-fg2 group-hover/lead:block group-focus-visible/lead:block", childrenExpanded && "rotate-90")} strokeWidth={1.5} aria-hidden="true" />
             </IconButton>
           ) : (
-            // The logo and a status dot speak; the loaders and the idle dot are decoration.
-            <span className={GLYPH_BOX_CLS} aria-hidden={(lead !== "logo" && lead !== "status-dot") || undefined} data-sidebar-lead={lead}>
+            // The logo, a status dot and a loader speak (Compact has no status
+            // word to say Working); the idle dot and folder/Design marks are decoration.
+            <span className={GLYPH_BOX_CLS} aria-hidden={(lead === "idle-dot" || lead === "folder" || lead === "design") || undefined} data-sidebar-lead={lead}>
               {leadMark}
             </span>
           )}

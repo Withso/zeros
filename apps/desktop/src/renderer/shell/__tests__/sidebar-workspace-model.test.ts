@@ -6,6 +6,7 @@ import type { Project } from "../../state/projects-store";
 import { acceptCloudWorkspaceDocument, clearCloudWorkspaceCatalog, getCloudProjects, getCloudWorkspaceRows } from "../../state/cloud-workspace-catalog";
 import {
   buildSidebarWorkspaceEntries,
+  sidebarSelectedProjectIds,
   sidebarItemSelectionKey,
   sidebarScrollTopToReveal,
   sidebarWorkspaceItems,
@@ -507,5 +508,18 @@ describe("sidebar reveal scrolling", () => {
         itemBottom: 900,
       }),
     ).toBe(280);
+  });
+});
+
+
+describe("the repository selection", () => {
+  // The list and the Group menu's counts share one scope: selecting either
+  // side of a joined project selects the whole project.
+  it("widens a selected member to its joined project and is empty without a selection", () => {
+    const group = (id: string) => (id === "local" || id === "cloud" ? [{ id: "local" }, { id: "cloud" }] as never : undefined);
+    expect(sidebarSelectedProjectIds([], group).size).toBe(0);
+    expect([...sidebarSelectedProjectIds(["cloud"], group)]).toEqual(["local", "cloud"]);
+    expect([...sidebarSelectedProjectIds(["other"], group)]).toEqual(["other"]);
+    expect([...sidebarSelectedProjectIds(["cloud"], undefined)]).toEqual(["cloud"]);
   });
 });

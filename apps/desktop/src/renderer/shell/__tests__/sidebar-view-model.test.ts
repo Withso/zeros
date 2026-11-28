@@ -214,7 +214,10 @@ describe("sidebar row leading slot", () => {
     expect(sidebarRowLead({ ...base, archiving: true, working: true, dotLead: true })).toBe("archiving");
   });
   it("carries the loader, the status dot or a faint idle dot in a dot lead", () => {
-    expect(sidebarRowLead({ ...base, dotLead: true, working: true, statusDot: true })).toBe("working");
+    // A status that outranks Working (a question, a plan, a failure) keeps its
+    // dot while another chat works; the loader shows when Working is the status.
+    expect(sidebarRowLead({ ...base, dotLead: true, working: true, statusDot: true })).toBe("status-dot");
+    expect(sidebarRowLead({ ...base, dotLead: true, working: true })).toBe("working");
     expect(sidebarRowLead({ ...base, dotLead: true, statusDot: true })).toBe("status-dot");
     expect(sidebarRowLead({ ...base, dotLead: true })).toBe("idle-dot");
   });
@@ -237,7 +240,8 @@ describe("sidebar row leading slot", () => {
 describe("sidebar row end mark", () => {
   const base = { archiving: false, working: false, dotLead: false, statusDot: false };
   it("shows the loader, else the status dot, at the right end", () => {
-    expect(sidebarRowEndMark({ ...base, working: true, statusDot: true })).toBe("loader");
+    expect(sidebarRowEndMark({ ...base, working: true, statusDot: true })).toBe("dot");
+    expect(sidebarRowEndMark({ ...base, working: true })).toBe("loader");
     expect(sidebarRowEndMark({ ...base, statusDot: true })).toBe("dot");
     expect(sidebarRowEndMark(base)).toBeNull();
   });
