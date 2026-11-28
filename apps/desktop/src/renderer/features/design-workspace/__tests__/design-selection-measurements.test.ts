@@ -31,4 +31,12 @@ describe("component selection size badge", () => {
     expect(instance).toContain("lucide-diamond");
     expect(instance).not.toContain("fill-current");
   });
+
+  it("shows the component name and the size, each in its own chip", () => {
+    for (const kind of ["main", "instance"] as const) {
+      const markup = renderComponentMark(kind);
+      expect(markup).toMatch(/data-design-selection-identity=""[^>]*>.*Button\/Default<\/span>/);
+      expect(markup).toMatch(/data-design-selection-dimensions=""[^>]*>320 × 180<\/span>/);
+    }
+  });
 });

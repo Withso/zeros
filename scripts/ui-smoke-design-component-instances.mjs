@@ -327,8 +327,10 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const sizeChip = page.locator("[data-design-selection-size]");
   const opsBeforeMarks = await page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).slice());
   await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(1);
-  check("a selected instance's chip shows the mark and its component/variant name, not its size",
-    (await sizeChip.innerText()).trim() === "Chat composer/Default" && (await sizeChip.getAttribute("data-design-selection-component")) === "",
+  check("a selected instance shows the mark and its component/variant name, then its size in its own chip",
+    (await sizeChip.locator("[data-design-selection-identity]").innerText()).trim() === "Chat composer/Default" &&
+      /^\d+(?: Hug| Fill)? × \d+/.test((await sizeChip.locator("[data-design-selection-dimensions]").innerText()).trim()) &&
+      (await sizeChip.getAttribute("data-design-selection-component")) === "",
     await sizeChip.innerText());
   check("a component frame shows the mark beside its name",
     (await frameLabel("pricing.html").locator("[data-design-component-mark]").count()) === 1 &&
