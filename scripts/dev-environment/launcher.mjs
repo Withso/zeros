@@ -152,7 +152,7 @@ async function start(workspace, profile) {
     await run("pnpm", ["--dir", "apps/control-plane", "build"], { cwd: root, env, signal, timeout: 180_000, label: "Control-plane build" });
     console.log("[zeros-dev] Selecting this checkout's worker runtime (build and publish if missing)");
     const runtime = await resolveLocalRuntime(workspace, profile, root, { signal });
-    // Best effort: a storage hiccup here must not stop Dev. An unmarked runtime is still kept for a week after upload.
+    // Best effort: a storage hiccup here must not stop Dev. A runtime nobody has marked is never removed.
     const runtimeOptions = { previous: process.env.ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256 };
     await maintainLocalRuntimes(workspace, profile, root, runtime, runtimeOptions).then(plan => console.log(`[zeros-dev] ${runtimeRetentionSummary(plan)}`),
       () => console.log("[zeros-dev] Worker runtime use was not recorded and cleanup was skipped; the next start retries."));
