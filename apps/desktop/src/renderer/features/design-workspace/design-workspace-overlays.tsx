@@ -177,10 +177,10 @@ export function paintDesignNodeOverlayGeometry(
   const size = element.querySelector<HTMLElement>(
     "[data-design-selection-size]",
   );
-  // An instance's chip names its component, which no gesture changes.
-  if (!size?.hasAttribute("data-design-selection-component"))
+  // A component's name has its own chip, which no gesture changes.
+  if (size)
     paintDesignLabelText(
-      size,
+      size.querySelector<HTMLElement>("[data-design-selection-dimensions]") ?? size,
       designSizeBadgeText(
         overlay.width,
         overlay.height,
@@ -1125,7 +1125,7 @@ export function DesignSelectionMeasurements({
   /** Painted border-box size the badge reads. */
   sizeWidth: number;
   sizeHeight: number;
-  /** A selected instance's component title, shown in place of its size. */
+  /** A selected component's title, shown in its own chip before its size. */
   component?: string | null;
   componentKind?: "main" | "instance";
   onSpacingPointerDown?: DesignLayoutToolsProps["onSpacingPointerDown"];
@@ -1153,9 +1153,10 @@ export function DesignSelectionMeasurements({
               : undefined
           }
           className={cn(
-            "zd-design-selection-label pointer-events-none absolute",
-            DESIGN_CANVAS_CHIP_CLS,
-            component && "inline-flex items-center gap-1",
+            "pointer-events-none absolute",
+            component
+              ? "inline-flex items-center gap-1 whitespace-nowrap"
+              : ["zd-design-selection-label", DESIGN_CANVAS_CHIP_CLS],
           )}
           style={designSelectionLabelStyle(
             designSelectionOverlayFrame(designSelectionBox(details)),
@@ -1163,20 +1164,31 @@ export function DesignSelectionMeasurements({
         >
           {component ? (
             <>
-              {componentKind === "main" ? (
-                <ComponentGlyph
-                  data-design-component-mark="main"
-                  className="text-violet-text fill-current size-[11px] shrink-0"
-                  aria-hidden="true"
-                />
-              ) : (
-                <Diamond
-                  data-design-component-mark="instance"
-                  className="size-[11px] shrink-0"
-                  aria-hidden="true"
-                />
-              )}
-              {component}
+              <span
+                data-design-selection-identity=""
+                className={cn("zd-design-selection-label", DESIGN_CANVAS_CHIP_CLS)}
+              >
+                {componentKind === "main" ? (
+                  <ComponentGlyph
+                    data-design-component-mark="main"
+                    className="fill-current size-[11px] shrink-0"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Diamond
+                    data-design-component-mark="instance"
+                    className="size-[11px] shrink-0"
+                    aria-hidden="true"
+                  />
+                )}
+                {component}
+              </span>
+              <span
+                data-design-selection-dimensions=""
+                className={cn("zd-design-selection-label", DESIGN_CANVAS_CHIP_CLS)}
+              >
+                {designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)}
+              </span>
             </>
           ) : (
             designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)

@@ -1050,6 +1050,37 @@
         }
       }
     },
+    "violet-solid": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [267.0, 80.0, 59.0]
+      },
+      "$description": "violet fill carrying violet-solid-fg (component selection badge)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-solid",
+          "section": "base-yellow-wash",
+          "utility": "--color-violet-solid",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 116
+        }
+      }
+    },
+    "violet-solid-fg": {
+      "$type": "color",
+      "$value": "{tokens.red-solid-fg}",
+      "$description": "label on violet-solid",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--violet-solid-fg",
+          "section": "base-yellow-wash",
+          "utility": "--color-violet-solid-fg",
+          "utilitySection": "utilities-green-solid",
+          "utilityOrder": 117
+        }
+      }
+    },
     "violet-text": {
       "$type": "color",
       "$value": {

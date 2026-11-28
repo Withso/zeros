@@ -1207,8 +1207,8 @@
 [data-design-frame-component][data-design-frame-root-selected] {
   --design-selection-stroke: var(--violet-text);
   --design-selection-soft: var(--violet-bg);
-  --design-selection-label-bg: var(--violet-bg);
-  --design-selection-label-fg: var(--violet-on-bg);
+  --design-selection-label-bg: var(--violet-solid);
+  --design-selection-label-fg: var(--violet-solid-fg);
 }
 
 .zd-design-selection-outline {
