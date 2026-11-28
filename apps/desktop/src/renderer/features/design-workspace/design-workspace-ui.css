@@ -10,13 +10,15 @@
   position: absolute;
   top: calc(12px * var(--design-canvas-inverse-zoom));
   left: calc(12px * var(--design-canvas-inverse-zoom));
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
   transform: scale(var(--design-canvas-inverse-zoom));
   transform-origin: top left;
-  border: 1px solid var(--design-selection-stroke);
+  /* A 12px hit target around an 8px visible dot. */
+  border: 2px solid transparent;
   border-radius: 50%;
-  background: var(--design-selection-handle-fill);
+  background: var(--design-selection-handle-fill) padding-box;
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
   cursor: nwse-resize;
   pointer-events: auto;
   /* Above the selection's spacing zones inside the transformed canvas. */
