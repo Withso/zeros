@@ -58,7 +58,9 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
   const raw = value as Record<string, unknown>;
   if (typeof raw.id !== "string" || raw.id.length === 0) return null;
 
-  const kind = raw.kind === "terminal" ? "terminal" : "chat";
+  // A side chat must stay one across a relaunch: read back as "chat", the
+  // reconciler would push it to the engine as an ordinary session.
+  const kind = raw.kind === "terminal" || raw.kind === "side" ? raw.kind : "chat";
   const createdAt = finiteNumber(raw.createdAt, 0);
   const effort = VALID_EFFORTS.has(raw.effort as ChatEffort)
     ? (raw.effort as ChatEffort)

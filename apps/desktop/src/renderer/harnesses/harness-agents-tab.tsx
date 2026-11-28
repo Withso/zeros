@@ -12,6 +12,7 @@ import { BLANK, useSessionsStore } from "../features/agent/sessions-store";
 import { noteChatsFinished } from "../features/agent/chat-unread";
 import { AgentsTab } from "../shell/workbench/tabs/agents-tab";
 import { SideChatBranchBanner } from "../features/agent/side-chat-banner";
+import { rememberColumnChat, setSideChatSeed } from "../features/agent/side-chat";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import type { WorkbenchTab } from "../shell/workbench/tab-model";
 
@@ -35,10 +36,18 @@ const chats: ChatThread[] = [
   child("c-other", "Update sidebar docs page", { folder: "/docs", updatedAt: now - 86_400_000 }),
   child("c-arch", "Spike: shared session store", { archived: true }),
   chat("side", "Side chat", { kind: "side", sourceChatId: "p1" }),
+  // Branched before the side-chat kind existed: a Local child known by its seed.
+  child("side-legacy", "Side chat", { sourceChatId: "p1" }),
   chat("term", "Claude Code · Terminal 2", { kind: "terminal" }),
 ];
 
-useWorkspaceStore.setState({ chats, activeChatId: "c-idle" });
+setSideChatSeed("side-legacy", {
+  sourceChatId: "p1", sourceTitle: "Research multi-agent chat UX", messageId: "m1", promptId: null,
+  role: "agent", quote: "Earlier branch", pending: false, createdAt: now, sourceUpdatedAt: now,
+});
+// A focused side chat: the tab stays on the chat column's own session.
+rememberColumnChat("/repo", "c-idle");
+useWorkspaceStore.setState({ chats, activeChatId: "side" });
 useSessionsStore.setState({ pendingLocalTurns: { "c-run": "turn" } });
 for (const [id, pending] of [
   ["c-input", { pendingQuestions: [{ request: { blocking: true } }] }],

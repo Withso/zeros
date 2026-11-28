@@ -11,6 +11,17 @@ vi.mock("../../../platform/runtime", async (original) => ({
 vi.mock("../conversation-header", () => ({
   OpenInSubmenu: ({ path }: { path: string }) => createElement("span", { "data-open-in": path }, "Open in"),
 }));
+const childTargets = vi.hoisted(() => [] as string[]);
+vi.mock("../../../features/agent/add-child-session", async (original) => {
+  const actual = await original<typeof import("../../../features/agent/add-child-session")>();
+  return {
+    ...actual,
+    canAddChildSession: (parent: Parameters<typeof actual.canAddChildSession>[0]) => {
+      if (parent) childTargets.push(parent.id);
+      return actual.canAddChildSession(parent);
+    },
+  };
+});
 vi.mock("../../../state/chat-panes-store", () => ({
   useChatPanesStore: (select: (state: { byFolder: Record<string, unknown> }) => unknown) => select({ byFolder: {} }),
 }));
@@ -49,8 +60,11 @@ describe("session actions while a side chat has focus", () => {
   it("acts on the chat column's session and never offers a side chat there", () => {
     fixture.chats = [chat("column"), chat("side", { kind: "side", sourceChatId: "column" })];
     fixture.activeChatId = "side";
+    childTargets.length = 0;
     const html = render(folder);
     expect(html).toContain("Add child session");
+    expect(childTargets).toContain("column");
+    expect(childTargets).not.toContain("side");
     expect(html).not.toContain("New side chat");
   });
 });

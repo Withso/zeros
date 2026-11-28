@@ -12,8 +12,9 @@ export async function runAgentsTabSmoke({ page, check, harnessBase }) {
   check("groups read Needs you, Working, Idle, then Archived", true);
 
   await expect(tab.locator('[data-agents-row="side"]')).toHaveCount(0);
+  await expect(tab.locator('[data-agents-row="side-legacy"]')).toHaveCount(0);
   await expect(tab.getByText("Side chat", { exact: true })).toHaveCount(0);
-  check("a side chat never appears in the Agents tab", true);
+  check("a side chat never appears in the Agents tab, nor one branched before the marker", true);
 
   const archived = tab.locator('[data-agents-group="archived"]');
   await expect(archived.locator("[data-agents-row]")).toHaveCount(0);
@@ -29,7 +30,7 @@ export async function runAgentsTabSmoke({ page, check, harnessBase }) {
 
   await expect(tab.locator('[data-agents-row="c-idle"]')).toContainText("Viewing");
   await expect(tab.getByRole("button", { name: "Open Switch harness and model in place" })).toHaveAttribute("aria-current", "true");
-  check("the session open in the chat reads Viewing", true);
+  check("with a side chat focused, the chat column's session reads Viewing", true);
 
   const tabsList = tab.getByRole("tablist", { name: "Parent sessions" });
   const firstCard = tab.locator("[data-agents-group]").first();

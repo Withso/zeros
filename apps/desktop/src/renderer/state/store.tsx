@@ -401,7 +401,8 @@ export type ChatThread = {
    *  the user manages both with one mental model. `"side"` is an agent
    *  chat shown only as a Workbench side chat tab: it is never a session, so
    *  the session tree, its menus and the Agents tab leave it out. Older builds
-   *  read it as `"chat"`. */
+   *  read it as `"chat"`; with no parent link they list it as a parent
+   *  session. */
   kind?: "chat" | "terminal" | "side";
   /** agent id bound to this chat. null means "pick the default agent
    *  when the session first starts" — set once and immutable thereafter.

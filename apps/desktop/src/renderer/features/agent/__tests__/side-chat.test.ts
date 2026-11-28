@@ -63,10 +63,7 @@ afterEach(() => {
 function deps() {
   return {
     publishChat: vi.fn(),
-    createChild: vi.fn().mockResolvedValue({ parentChatId: "source", rootChatId: "source" }),
     warm: vi.fn(),
-    chatExists: () => true,
-    onError: vi.fn(),
     now: 100,
   };
 }
@@ -126,8 +123,8 @@ describe("openSideChat", () => {
     const d = deps();
     const chat = openSideChat(local, { messageId: "m2", promptId: "m1", role: "agent", text: "  The answer\n\n\n\nmore " }, d)!;
     expect(d.publishChat).toHaveBeenCalledWith(chat);
-    expect(d.createChild).not.toHaveBeenCalled();
     expect(chat.kind).toBe("side");
+    expect(chat.parentChatId).toBeUndefined();
     const seed = getSideChatSeed(chat.id)!;
     expect(seed).toMatchObject({ sourceChatId: "source", messageId: "m2", promptId: "m1", role: "agent", quote: "The answer\n\nmore", pending: true, sourceUpdatedAt: 2 });
     expect(d.warm).toHaveBeenCalledWith(seed, "/repo");
@@ -143,7 +140,7 @@ describe("openSideChat", () => {
   it("opens cloud side chats without a child link", () => {
     const d = deps();
     const chat = openSideChat(cloud, { messageId: "m1", promptId: "m1", role: "user", text: "hi" }, d)!;
-    expect(d.createChild).not.toHaveBeenCalled();
+    expect(chat.parentChatId).toBeUndefined();
     expect(getSideChatSeed(chat.id)?.pending).toBe(true);
   });
 

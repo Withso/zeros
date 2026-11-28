@@ -5,7 +5,7 @@
 // status word or time, PR marks and, for a child elsewhere, where it runs.
 // Side chats are Workbench tabs of their own and never appear here.
 
-import { useId, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useId, useMemo, useState, useSyncExternalStore } from "react";
 import { Bot, Terminal } from "lucide-react";
 import { AgentActivityIndicator } from "../../../features/agent/agent-activity-indicator";
 import { chatAgentActivity } from "../../../features/agent/agent-activity";
@@ -69,6 +69,7 @@ function useUnreadIds(ids: readonly string[]): ReadonlySet<string> {
 
 const NO_IDS: readonly string[] = [];
 const NO_WORKSPACES: readonly Workspace[] = [];
+const NO_PLACE: AgentsRowPlace = { separate: false, cloud: false, project: null };
 
 function descendants(node: SessionNode): ChatThread[] {
   return node.children.flatMap((child) => [child.chat, ...descendants(child)]);
@@ -131,37 +132,44 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const statusOf = useMemo(() => new Map(watchIds.map((id, index) => [id, statuses[index] ?? "idle"])), [watchIds, statuses]);
   const ownerIds = useMemo(() => (parentId ? [parentId, ...children.map((chat) => chat.id)] : NO_IDS), [parentId, children]);
   const natives = useNativeSubagents(active ? ownerIds : NO_IDS);
-  const childWorkspaces = useMemo(() => {
-    if (!active) return NO_WORKSPACES;
-    const seen = new Map<string, Workspace>();
-    for (const chat of children) {
-      const workspace = findWorkspaceForFolder(chat.folder, live);
-      if (workspace && workspace.id !== currentWorkspace?.id) seen.set(workspace.id, workspace);
+  // Every descendant's own workspace and place, for its row and for the
+  // Needs you dot on its parent's tab.
+  const places = useMemo(() => {
+    const out = new Map<string, { place: AgentsRowPlace; own: Workspace | null }>();
+    if (!active) return out;
+    for (const id of allChildIds) {
+      const chat = tree.byId.get(id)?.chat;
+      if (!chat) continue;
+      const child = findWorkspaceForFolder(chat.folder, live);
+      const place = agentsRowPlace(chat, { folder, current: currentWorkspace ?? null, child, cloud: isCloudWorkspace(chat.folder) });
+      out.set(id, { place, own: place.separate && child ? child : null });
     }
-    return [...seen.values()];
-  }, [active, children, live, currentWorkspace?.id]);
+    return out;
+  }, [active, allChildIds, tree, live, folder, currentWorkspace]);
+  const childWorkspaces = useMemo(() => {
+    const seen = new Map<string, Workspace>();
+    for (const { own } of places.values()) if (own) seen.set(own.id, own);
+    return seen.size ? [...seen.values()] : NO_WORKSPACES;
+  }, [places]);
   const cloudErrors = useCloudErrorWorkspaceIds(childWorkspaces);
+  const signalOf = useCallback((chat: ChatThread): AgentsRowSignal => {
+    const own = places.get(chat.id)?.own ?? null;
+    return {
+      status: statusOf.get(chat.id) ?? "idle",
+      unread: unread.has(chat.id),
+      archived: !!chat.archived,
+      setupFailed: !!own && setupFailureShown(own, acknowledged.has(own.id)),
+      cloudError: !!own && cloudErrors.has(own.id),
+    };
+  }, [places, statusOf, unread, acknowledged, cloudErrors]);
   // Stored chats stay browsable while a cloud runtime sleeps.
   useWorkbenchStatusSource({ pending: false, primary: true, hasContent: chats.length > 0 });
 
   const rows = useMemo<AgentsRowItem[]>(() => {
     const out: AgentsRowItem[] = [];
     for (const chat of children) {
-      const childWorkspace = findWorkspaceForFolder(chat.folder, live);
-      const place = agentsRowPlace(chat, {
-        folder,
-        current: currentWorkspace ?? null,
-        child: childWorkspace,
-        cloud: isCloudWorkspace(chat.folder),
-      });
-      const own = place.separate && childWorkspace ? childWorkspace : null;
-      const signal: AgentsRowSignal = {
-        status: statusOf.get(chat.id) ?? "idle",
-        unread: unread.has(chat.id),
-        archived: !!chat.archived,
-        setupFailed: !!own && setupFailureShown(own, acknowledged.has(own.id)),
-        cloudError: !!own && cloudErrors.has(own.id),
-      };
+      const { place, own } = places.get(chat.id) ?? { place: NO_PLACE, own: null };
+      const signal = signalOf(chat);
       out.push({
         key: chat.id,
         kind: "session",
@@ -182,17 +190,17 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
       const signal: AgentsRowSignal = { status: "idle", unread: false };
       out.push({
         key: chat.id, kind: "terminal", name: sessionName(chat), agentId: chat.agentId ?? null, openId: chat.id,
-        signal, group: "idle", place: { separate: false, cloud: false, project: null }, placeFolder: null,
+        signal, group: "idle", place: NO_PLACE, placeFolder: null,
         pulls: [], updatedAt: chat.updatedAt, viewing: chat.id === viewingId,
       });
     }
     return out;
-  }, [children, natives, terminals, live, folder, currentWorkspace, statusOf, unread, acknowledged, cloudErrors, viewingId]);
+  }, [children, natives, terminals, places, signalOf, viewingId]);
 
   const needsYouByRoot = useMemo(() => new Set(rootIds.filter((root) => root.ids.some((id) => {
     const chat = tree.byId.get(id)?.chat;
-    return !!chat && agentsGroupOf({ status: statusOf.get(id) ?? "idle", unread: unread.has(id), archived: !!chat.archived }) === "needs-you";
-  })).map((root) => root.id)), [rootIds, tree, statusOf, unread]);
+    return !!chat && agentsGroupOf(signalOf(chat)) === "needs-you";
+  })).map((root) => root.id)), [rootIds, tree, signalOf]);
 
   const groups = useMemo(() => groupAgentsRows(rows), [rows]);
   const select = (id: string) => openSession(dispatch, id);
@@ -234,7 +242,7 @@ function nativeRow(agent: NativeSubagent): AgentsRowItem {
   const signal: AgentsRowSignal = { status: agent.running ? "running" : "idle", unread: false };
   return {
     key: `native:${agent.id}`, kind: "native", name: agent.title, agentId: null, openId: agent.ownerChatId,
-    signal, group: agentsGroupOf(signal), place: { separate: false, cloud: false, project: null }, placeFolder: null,
+    signal, group: agentsGroupOf(signal), place: NO_PLACE, placeFolder: null,
     pulls: [], updatedAt: 0, viewing: false,
   };
 }

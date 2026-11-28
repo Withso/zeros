@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatThread } from "../../../state/store";
 import type { TranscriptSnapshot } from "../chat-transcript-attach";
 import { addChildSession, canAddChildSession, createChildChat, hasParentContext } from "../add-child-session";
-import { isAddChildSessionShortcut } from "../../../shell/use-add-child-session-hotkey";
+import { childSessionParentFor, isAddChildSessionShortcut } from "../../../shell/use-add-child-session-hotkey";
 
 const parent: ChatThread = {
   id: "parent",
@@ -56,6 +56,7 @@ describe("Add child session", () => {
     expect(canAddChildSession({ ...parent, folder: "cloud://org-1/ws-1" })).toBe(false);
     expect(canAddChildSession({ ...parent, kind: "terminal" })).toBe(false);
     expect(canAddChildSession({ ...parent, archived: true })).toBe(false);
+    expect(canAddChildSession({ ...parent, kind: "side" })).toBe(false);
     expect(canAddChildSession(undefined)).toBe(false);
     const d = deps();
     expect(addChildSession({ ...parent, folder: "cloud://org-1/ws-1" }, d)).toBeNull();
@@ -97,6 +98,13 @@ describe("Add child session", () => {
     expect(empty.deliver).not.toHaveBeenCalled();
     expect(gone.deliver).not.toHaveBeenCalled();
     expect(gone.onError).not.toHaveBeenCalled();
+  });
+
+  it("⌥⌘T on a focused side chat adds a child to the chat column's session", () => {
+    const side: ChatThread = { ...parent, id: "side", kind: "side", sourceChatId: "parent" };
+    expect(childSessionParentFor([parent, side], "side")?.id).toBe("parent");
+    expect(childSessionParentFor([parent, side], "parent")?.id).toBe("parent");
+    expect(childSessionParentFor([parent], null)).toBeNull();
   });
 
   it("answers ⌥⌘T only", () => {
