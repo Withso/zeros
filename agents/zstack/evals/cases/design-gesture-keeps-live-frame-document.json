@@ -1,0 +1,9 @@
+{
+  "id": "design-gesture-keeps-live-frame-document",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1369",
+  "symptom": "Suppressing passive live-frame admission during camera gestures also dropped frames already running a document when a picture covered them, so a Retina high-resolution tile vanished for ~15 frames mid-pan and the frame swapped picture/document at rest; main's Retina tile handoff smoke went red.",
+  "rule": "Gesture-time admission limits may block new documents, never evict documents already live and visible; a running document is retained until the camera rests.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-frame-residency.test.ts -t \"keeps an already-live frame's document through a camera gesture\""
+}
