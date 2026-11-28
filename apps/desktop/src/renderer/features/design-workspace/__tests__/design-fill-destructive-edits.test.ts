@@ -256,7 +256,7 @@ describe("destructive fill edits", () => {
   });
 
   it("disables colour editing for a var() gradient stop while angle editing stays available", async () => {
-    const authored = "linear-gradient(135deg, var(--accent), var(--success))";
+    const authored = "linear-gradient(135deg, VAR(--accent), var(--success))";
     const details = detailsFor(
       {
         backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture

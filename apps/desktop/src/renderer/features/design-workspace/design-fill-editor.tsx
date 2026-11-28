@@ -524,7 +524,7 @@ function DesignFillPopover({
                       : (resolvedGradient?.[stop] ?? gradient[stop])
                   }
                   label={stop === "start" ? "Start stop" : "End stop"}
-                  disabled={disabled || gradient[stop].includes("var(")}
+                  disabled={disabled || gradient[stop].toLocaleLowerCase().includes("var(")}
                   panelRef={panelRef}
                   onPreview={(next) =>
                     void updateGradient({ [stop]: next }, false)
