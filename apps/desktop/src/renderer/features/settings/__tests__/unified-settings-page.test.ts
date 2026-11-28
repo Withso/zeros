@@ -204,7 +204,7 @@ describe("unified Settings rail", () => {
     act(() => provider.click());
     expect(heading()).toBe("GitHub");
     expect(state.saved.get("local:section")).toBe("user:integrations");
-    const back = [...container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Back to Integrations");
+    const back = container.querySelector<HTMLButtonElement>('button[aria-label="Back to Integrations"]');
     expect(back).toBeDefined();
     act(() => back!.click());
     expect(heading()).toBe("Integrations");
@@ -315,7 +315,9 @@ describe("unified Settings rail", () => {
     expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
     expect(container.textContent).not.toContain("personal-repositories-fixture");
     const click = (label: string) => act(() => {
-      [...container.querySelectorAll<HTMLElement>("button")].find(el => el.textContent?.trim() === label)!.click();
+      // A link row's name is its label followed by its hint.
+      [...container.querySelectorAll<HTMLElement>("button")].find(el => el.getAttribute("aria-label") === label
+        || el.textContent?.trim() === label || el.querySelector("span span")?.textContent === label)!.click();
     });
     click("Configure account identity");
     expect(activeEntry()).toBe("Integrations");

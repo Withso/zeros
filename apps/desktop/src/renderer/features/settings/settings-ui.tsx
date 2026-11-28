@@ -1,9 +1,10 @@
 
 import React from "react";
-import { Cloud, Laptop, Lock, Plus } from "lucide-react";
+import { ChevronRight, Cloud, Laptop, Lock, Plus } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
 import { Button } from "@/renderer/shared/ui/primitives/button";
+import { ListRow } from "@/renderer/shared/ui/primitives/list-row";
 
 const NAME_CLS = "text-fg1 text-xs leading-4.5 font-medium";
 const HINT_CLS = "text-fg3 text-3xxs leading-4";
@@ -184,6 +185,38 @@ export function SettingsRow({
         text
       )}
       {children != null && <div className="flex shrink-0 items-center gap-2">{children}</div>}
+    </div>
+  );
+}
+
+/** A settings-card row that opens something: the name and hint are one button,
+ * with a chevron unless the row carries its own action, which sits beside it. */
+export function SettingsLinkRow({
+  label,
+  hint,
+  leading,
+  action,
+  onClick,
+  "aria-label": ariaLabel,
+}: {
+  label: React.ReactNode;
+  hint?: React.ReactNode;
+  leading?: React.ReactNode;
+  action?: React.ReactNode;
+  onClick(): void;
+  "aria-label"?: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <ListRow variant="settings" aria-label={ariaLabel} onClick={onClick}>
+        {leading}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className={cn(NAME_CLS, "truncate")}>{label}</span>
+          {hint && <span className={HINT_CLS}>{hint}</span>}
+        </span>
+        {!action && <ChevronRight className="text-fg3 size-3.5 shrink-0" aria-hidden />}
+      </ListRow>
+      {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
     </div>
   );
 }

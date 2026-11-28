@@ -285,6 +285,36 @@ describe("GitHub at two levels in Settings", () => {
     }
   });
 
+  it("pages through a connection's repositories with Next and Previous", async () => {
+    const levels = await import("../../../platform/cloud-github-levels");
+    const read = vi.mocked(levels.getCloudGithubConnectionRepositories);
+    fixtures.connections = { organization: [connection("77777777-7777-4777-8777-777777777779", "paged", "organization", "active", 960)], personal: [], solo: false };
+    read.mockImplementation(async (_org: string, _id: string, page = 1) => ({ connection: fixtures.connections.organization[0], nextPage: page === 1 ? 2 : null,
+      repositories: [{ id: String(page), repository: `paged/page-${page}`, defaultBranch: "main", private: false, projects: [] }] }) as never);
+    fixtures.visible.push({ installationId: 960, accountLogin: "paged", suspended: false });
+    try {
+      await page("pager", false);
+      await click("View @paged");
+      const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find(el => el.textContent === "Repositories")!;
+      await act(async () => tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(document.body.textContent).toContain("paged/page-1");
+      expect(button("Previous page")).toBeUndefined();
+      await click("Next page");
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(document.body.textContent).toContain("paged/page-2");
+      expect(document.body.textContent).not.toContain("paged/page-1");
+      expect(button("Next page")).toBeUndefined();
+      await click("Previous page");
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(document.body.textContent).toContain("paged/page-1");
+    } finally {
+      fixtures.visible.pop();
+      read.mockImplementation(async () => ({ connection: fixtures.connections.organization[0], nextPage: null, ...fixtures.drawer }) as never);
+      await click("Close");
+    }
+  });
+
   it("explains what forbidding projects for one member does, read-only for members", async () => {
     let text = await render(createElement(PersonalProjectsSetting, { userId: "99999999-9999-4999-8999-999999999999", organizationId: ORG, canManage: true, active: true }));
     expect(text).toContain("existing workspaces keep working");

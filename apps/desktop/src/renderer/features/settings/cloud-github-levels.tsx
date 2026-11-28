@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { ChevronRight, ExternalLink, Plus } from "lucide-react";
-import { ListRow } from "../../shared/ui/primitives/list-row";
+import { ExternalLink } from "lucide-react";
 import { GithubConnectionDrawer } from "./github-connection-drawer";
 import { useSharedGithub } from "./use-shared-github";
-import { Button } from "../../shared/ui";
+import { Button, GithubIcon } from "../../shared/ui";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../shared/ui/primitives/sheet";
@@ -18,7 +17,7 @@ import {
   type CloudGithubLevelConnection, type CloudGithubLevelConnections, type CloudGithubVisibleInstallation, type CloudProject, type CloudProjects,
 } from "../../platform/cloud-github-levels";
 import { message } from "./cloud-computer-store";
-import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-ui";
+import { SettingsAddRow, SettingsGroup, SettingsLinkRow, SettingsRow } from "./settings-ui";
 
 /** Null: this control plane has no GitHub levels (ready copies off or older). */
 export const githubLevelConnections = new KeyedAsyncCache<CloudGithubLevelConnections | null>({ maxEntries: 16 });
@@ -58,7 +57,7 @@ export function connectionStateHint(connection: Pick<CloudGithubLevelConnection,
   if (connection.installationId === null) return "Connect this account's Zeros App installation to finish moving it here.";
   return null;
 }
-type ConnectionSheet = { kind: "add" } | { kind: "link" | "reinstall" | "view"; id: string };
+type ConnectionSheet = { kind: "add"; level: CloudGithubLevelConnection["level"] } | { kind: "link" | "reinstall" | "view"; id: string };
 type Level = CloudGithubLevelConnection["level"];
 
 function useVisibleInstallations(userId: string, organizationId: string, generation: string | undefined, active: boolean) {
@@ -80,9 +79,10 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
   const connections = levels.connections;
   if (!connections) return null;
   const own = connections.personal.filter(row => row.mine);
+  // Personal's own cloud has one person: one list, and "Only you" only if it already holds rows.
   const groups = [
-    { level: "organization", name: personal ? "Projects" : organizationName, rows: connections.organization, editable: canManage },
-    { level: "personal", name: "Only you", rows: own, editable: true },
+    { level: "organization" as const, name: personal ? "Connections" : `Shared with ${organizationName}`, rows: connections.organization, editable: canManage },
+    ...(personal && !own.length ? [] : [{ level: "personal" as const, name: "Only you", rows: own, editable: true }]),
   ];
   const selected = sheet && sheet.kind !== "add"
     ? [...connections.organization, ...own].find(row => row.id === sheet.id) : undefined;
@@ -124,43 +124,43 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
     try { await shellOpenUrl(installUrl); } catch (cause) { setHandoffError(message(cause)); }
   };
   return <>
-    <SettingsSection title="Connections" description="GitHub accounts connected to your projects."
-      action={<Button variant="primary" onClick={() => setSheet({ kind: "add" })}><Plus aria-hidden />Add connection</Button>}>
-      {groups.map(group => <SettingsGroup key={group.level} title={group.name} aria-label={group.name}>
-        {group.rows.length === 0 && <SettingsRow label="No connections yet" />}
-        {group.rows.map(row => <div key={row.id} className="flex items-center gap-2">
-          <ListRow variant="panel" className="h-auto min-h-9 gap-2" aria-label={`View @${row.accountLogin}`} onClick={() => setSheet({ kind: "view", id: row.id })}>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">@{row.accountLogin}</span>
-              <span className="text-fg3 block text-3xxs">{connectionStateHint(row) ?? accessHint(row) ?? (group.editable ? "Connected" : "Managed by admins")}</span>
-            </span>
-            <ChevronRight aria-hidden />
-          </ListRow>
-          {group.editable && row.state === "uninstalled" && <Button variant="secondary" disabled={!installUrl}
-            aria-label={`Reinstall @${row.accountLogin}`} onClick={() => void reinstall(row)}>Reinstall</Button>}
-          {needsLink(row) && <Button variant="secondary"
-            aria-label={`Link @${row.accountLogin}`} onClick={() => setSheet({ kind: "link", id: row.id })}>Link</Button>}
-        </div>)}
-      </SettingsGroup>)}
-    </SettingsSection>
+    <div className="flex flex-col gap-6">
+        {groups.map(group => <SettingsGroup key={group.level} title={group.name} aria-label={group.name}>
+          {group.rows.length === 0 && !group.editable && <SettingsRow label="No connections yet" />}
+          {group.rows.map(row => {
+            const reinstallable = group.editable && row.state === "uninstalled";
+            const linkable = needsLink(row);
+            return <SettingsLinkRow key={row.id} label={`@${row.accountLogin}`} leading={<GithubIcon className="text-fg3 size-4" aria-hidden />}
+              hint={connectionStateHint(row) ?? accessHint(row) ?? (group.editable ? "Connected" : "Managed by admins")}
+              aria-label={`View @${row.accountLogin}`} onClick={() => setSheet({ kind: "view", id: row.id })}
+              action={reinstallable || linkable ? <>
+                {reinstallable && <Button variant="secondary" disabled={!installUrl}
+                  aria-label={`Reinstall @${row.accountLogin}`} onClick={() => void reinstall(row)}>Reinstall</Button>}
+                {linkable && <Button variant="secondary"
+                  aria-label={`Link @${row.accountLogin}`} onClick={() => setSheet({ kind: "link", id: row.id })}>Link</Button>}
+              </> : undefined} />;
+          })}
+          {group.editable && <SettingsAddRow label="Add connection" onClick={() => setSheet({ kind: "add", level: group.level })} />}
+        </SettingsGroup>)}
+    </div>
     {active && showDetails && selected && <GithubConnectionDrawer key={selected.id} userId={userId} organizationId={organizationId}
       connection={selected} canManage={selected.level === "personal" || canManage} personal={personal} accountLogin={appLogin} accountType={visible.data?.find(item => item.installationId === selected.installationId)?.accountType} accessNotice={accessNotice} credentialGeneration={status?.generation} installUrl={installUrl}
       onChanged={levels.refresh} onClose={close} />}
     {active && !showDetails && (sheet?.kind === "add" || ((sheet?.kind === "link" || sheet?.kind === "reinstall") && selected)) &&
       <AddConnection key={selected?.id ?? "add"} userId={userId} organizationId={organizationId} organizationName={organizationName}
-        canManage={canManage} connections={connections} target={selected} reinstalling={sheet.kind === "reinstall"} handoffError={handoffError} visible={visible} status={status} app={app} readError={identity.read.readError}
+        canManage={canManage} connections={connections} target={selected} initialLevel={sheet.kind === "add" ? sheet.level : undefined} reinstalling={sheet.kind === "reinstall"} handoffError={handoffError} visible={visible} status={status} app={app} readError={identity.read.readError}
         onRefreshConnections={levels.refresh} onRefreshIdentity={identity.read.refresh} onConfigureIdentity={configureIdentity}
         onClose={close} onConnected={() => { levels.refresh(); close(); }} />}
   </>;
 }
 
-function AddConnection({ userId, organizationId, organizationName, canManage, connections, target, status, app, visible, readError, reinstalling, handoffError, onRefreshConnections, onRefreshIdentity,
+function AddConnection({ userId, organizationId, organizationName, canManage, connections, target, initialLevel, status, app, visible, readError, reinstalling, handoffError, onRefreshConnections, onRefreshIdentity,
   onConfigureIdentity, onClose, onConnected }: {
   userId: string; organizationId: string; organizationName: string; canManage: boolean; connections: CloudGithubLevelConnections;
-  target?: CloudGithubLevelConnection | undefined; status: ReturnType<typeof useSharedGithub>["read"]["data"]; readError: unknown;
+  target?: CloudGithubLevelConnection | undefined; initialLevel?: Level | undefined; status: ReturnType<typeof useSharedGithub>["read"]["data"]; readError: unknown;
   app: boolean; visible: ReturnType<typeof useVisibleInstallations>; reinstalling: boolean; handoffError: string | null; onRefreshConnections(): void; onRefreshIdentity(): void; onConfigureIdentity(): void; onClose(): void; onConnected(): void;
 }) {
-  const [level, setLevel] = useState<Level>(target?.level ?? "personal");
+  const [level, setLevel] = useState<Level>(target?.level ?? initialLevel ?? "personal");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const connected = new Set([...connections.organization, ...connections.personal].map(row => row.installationId));
   const choices = (visible.data ?? []).filter(row => !row.suspended && !connected.has(row.installationId) &&
@@ -222,7 +222,7 @@ function AddConnection({ userId, organizationId, organizationName, canManage, co
   </Sheet>;
 }
 
-export const PERSONAL_PROJECTS_HINT = "Members can create projects only they can use. Turning this off stops building and creating from them; existing workspaces keep working.";
+export const PERSONAL_PROJECTS_HINT = "Members can create projects only they can use. Turning this off stops new ones; existing workspaces keep working.";
 
 /** Owners and admins allow or forbid projects for one member. */
 export function PersonalProjectsSetting({ userId, organizationId, canManage, active }: { userId: string; organizationId: string; canManage: boolean; active: boolean }) {

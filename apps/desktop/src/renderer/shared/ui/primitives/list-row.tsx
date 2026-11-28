@@ -4,8 +4,10 @@ import { cn } from "@/renderer/shared/ui/cn";
 
 export interface ListRowProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   /** `panel`: a full-width row flush with an inspector panel's edges, in the
-   * panel's 11px type; `aria-pressed` fills it with `selected-bg`. */
-  variant?: "inline" | "panel";
+   * panel's 11px type; `aria-pressed` fills it with `selected-bg`. `settings`:
+   * a navigable settings-card row that keeps the card's row height and hovers
+   * on the card's raised surface. */
+  variant?: "inline" | "panel" | "settings";
   /** Panel rows only: `md` is the panel's 28px line with 12px lead, `sm` the
    * same 28px row inside a group (P7), with 6px sides and 4px corners. */
   size?: "md" | "sm";
@@ -18,6 +20,8 @@ const LIST_ROW_SHAPES = {
   inline: "-ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1",
   panel:
     "flex w-full min-w-0 items-center py-0 text-3xxs leading-4 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
+  // The card pads each row; the negative margins give the fill room without moving the text.
+  settings: "-mx-2 -my-1.5 flex min-w-0 flex-1 items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-bg1-raised-hover",
 } as const;
 
 const PANEL_ROW_SIZES = {
