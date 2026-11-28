@@ -498,7 +498,10 @@ function DesignZoomMenu({
               if (event.key === "Enter") {
                 event.preventDefault();
                 commitDraft();
-              } else if (event.key === "ArrowDown") {
+              } else if (
+                event.key === "ArrowDown" &&
+                !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey
+              ) {
                 event.preventDefault();
                 event.currentTarget
                   .closest('[role="menu"]')
