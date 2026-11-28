@@ -120,6 +120,7 @@ function harness(cwd = CLOUD, chat = CHAT) {
     cloudClosesRef: mapRef(), cloudCatalogGeneration: () => account.value,
     prebindDirtySessionsRef: mapRef(), prebindGoalSnapshotsRef: mapRef(),
     prebindBackgroundTasksRef: { current: { clearChat: vi.fn(), clear: vi.fn() } },
+    discardLocalQueueRef: { current: vi.fn() },
     pendingHydratesRef: { current: new Set() }, hydrateInFlightRef: mapRef(), reconcileInFlightRef: mapRef(),
     nativeTranscriptSnapshotsRef: mapRef(), cloudFlushRef: mapRef(), queueHeldRef: mapRef(), flushBubbleRef: mapRef(),
     authPromptsRef: mapRef(), turnProducedOutputRef: mapRef(), announcedDirsRef: mapRef(), promptActivityRef: mapRef(),

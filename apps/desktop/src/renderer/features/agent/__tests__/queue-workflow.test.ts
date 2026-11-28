@@ -41,6 +41,7 @@ const names = new Set([
   "isLocalQueueChat",
   "saveLocalQueue",
   "restoreLocalQueue",
+  "discardLocalQueue",
 ]);
 const callbacks: string[] = [];
 function collect(node: ts.Node): void {
@@ -871,11 +872,15 @@ describe("Local queued follow-ups across a restart", () => {
     await vi.waitFor(() => expect(after.sent[0]?.[1]).toBe("B"));
   });
 
-  it("never saves a follow-up that is already being sent", async () => {
+  it("keeps a claimed follow-up saved until it leaves the queue for dispatch", async () => {
     const journal = createMemoryLocalQueueJournal();
     const h = setup("claude", "streaming", journal);
     h.context.localQueueReadRef.current.add("chat");
+    // A claim (for example while attachments are re-checked) is not delivery.
     h.queue.claim("chat", "B");
+    h.actions.saveLocalQueue("chat");
+    await vi.waitFor(async () => expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]));
+    h.queue.set("chat", h.queue.get("chat")!.filter(entry => entry.bubbleId !== "B"));
     h.actions.saveLocalQueue("chat");
     await vi.waitFor(async () => expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["C", "D"]));
   });
@@ -887,6 +892,17 @@ describe("Local queued follow-ups across a restart", () => {
     h.actions.saveLocalQueue("chat");
     await Promise.resolve();
     expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["saved"]);
+  });
+
+  it("erases a closed chat's saved follow-ups even when they were never read back", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    await journal.write("chat", [{ bubbleId: "saved", createdAt: 1, text: "Saved" }]);
+    const h = restart(journal);
+    h.actions.discardLocalQueue("chat");
+    await vi.waitFor(async () => expect(await journal.read("chat")).toEqual([]));
+    // A later reopen has nothing to bring back.
+    await h.actions.restoreLocalQueue("chat");
+    expect(h.queue.get("chat")).toBeUndefined();
   });
 
   it("keeps cloud chats out of the Local journal", async () => {

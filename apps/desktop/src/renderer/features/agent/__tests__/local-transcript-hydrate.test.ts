@@ -61,6 +61,7 @@ function harness(connected = true) {
     bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, forgetFreshLocalChat,
     prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } },
     restoreLocalQueueRef: { current: vi.fn(async () => {}) },
+    discardLocalQueueRef: { current: vi.fn() },
   };
   const resetMaps = ["cancelGenerationsRef", "promptAbortRef", "sendingChatsRef", "ensureInFlightRef", "loadFlightKeysRef",
     "loadFlightAdoptOnlyRef", "prebindDirtySessionsRef", "prebindGoalSnapshotsRef", "sendQueueRef", "queueHeldRef",
@@ -82,6 +83,7 @@ function harness(connected = true) {
   return {
     hydrate: context.hydrate as (chatId: string) => Promise<void>, read, resolve, pendingHydrates,
     restoreLocalQueue: (context.restoreLocalQueueRef as { current: ReturnType<typeof vi.fn> }).current,
+    reconcile: context.reconcile as (chatId: string) => Promise<void>,
     subscribeToCache: context.subscribeToCache as () => () => void,
     resetContext: context.resetContext as (chatId: string) => void,
     prepare: context.prepare as (chatId: string) => Promise<void> | null,
@@ -258,6 +260,18 @@ describe("Local transcript hydration", () => {
     const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     rememberLocalTranscript("chat-1", { ...BLANK, cwd, transcriptState: "resident" }, cwd);
     expect(localTranscriptCache.peek("chat-1")?.messages).toBe(messages);
+  });
+
+  it("keeps a Local queued bubble whose payload is still queued through a history refresh, and drops one that is not", async () => {
+    const queued = (id: string): AgentTextMessage => ({ ...user(id), queued: true });
+    useSessionsStore.getState().setSession("chat-q", { ...BLANK, cwd: "/repo", transcriptState: "resident",
+      messages: [user("a"), agent("a-answer"), queued("waiting"), queued("orphan")] });
+    const h = harness();
+    h.refs.sendQueueRef.current.set("chat-q", [{ bubbleId: "waiting", args: [] }]);
+    const refresh = h.reconcile("chat-q");
+    h.resolve({ messages: [user("a"), agent("a-answer"), agent("more")], source: "local" });
+    await refresh;
+    expect(slot("chat-q")?.messages.map(message => message.id)).toEqual(["a", "a-answer", "more", "waiting"]);
   });
 
   it("opens a chat this renderer just created without a read or a loading state", async () => {

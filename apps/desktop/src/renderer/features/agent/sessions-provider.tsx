@@ -1339,8 +1339,9 @@ export function AgentSessionsProvider({
 
   // Local follow-ups outlive a quit or reload. A chat's saved queue is only
   // rewritten after it has been read back this session, so clearing a chat
-  // before its restore cannot erase what it saved. In-flight sends are never
-  // saved: a restored entry is always one the agent has not received.
+  // before its restore cannot erase what it saved. An entry stays saved until
+  // it leaves the queue for dispatch: a claim only guards edits and double
+  // sends, it is not delivery. Steered sends are already with the agent.
   const localQueueReadRef = useRef(new Set<string>());
   const localQueueSavesRef = useRef(new Set<string>());
   const isLocalQueueChat = useCallback((chatId: string) =>
@@ -1350,7 +1351,7 @@ export function AgentSessionsProvider({
     const queue = sendQueueRef.current;
     const messages = getStore().sessions[chatId]?.messages ?? [];
     const entries = (queue.get(chatId) ?? [])
-      .filter(entry => !entry.cloud && !entry.steerRequest && !queue.isSending(chatId, entry.bubbleId))
+      .filter(entry => !entry.cloud && !entry.steerRequest)
       .map(entry => localQueuedPrompt(entry, messages));
     void localQueueJournal().write(chatId, entries).catch(() => { /* The in-memory queue still sends; only restart recovery is lost. */ });
   }, [getStore, isLocalQueueChat]);
@@ -1387,6 +1388,15 @@ export function AgentSessionsProvider({
   }, [getStore, isLocalQueueChat, pauseQueue, saveLocalQueue]);
   const restoreLocalQueueRef = useRef(restoreLocalQueue);
   restoreLocalQueueRef.current = restoreLocalQueue;
+  /** Closing, resetting or switching a chat discards its follow-ups, in memory
+   * and on disk, even when they were never read back this session. */
+  const discardLocalQueue = useCallback((chatId: string) => {
+    if (parseCloudScopedId(chatId)) return;
+    localQueueReadRef.current.add(chatId);
+    void localQueueJournal().write(chatId, []).catch(() => { /* Nothing else to undo. */ });
+  }, []);
+  const discardLocalQueueRef = useRef(discardLocalQueue);
+  discardLocalQueueRef.current = discardLocalQueue;
 
   const retryCloudQueuedPrompt = useCallback((chatId: string, entry: NonNullable<ReturnType<typeof sendQueueRef.current.get>>[number], account: number | undefined,
     folder: string | null | undefined) => {
@@ -5299,6 +5309,7 @@ export function AgentSessionsProvider({
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
       sendQueueRef.current.delete(chatId);
+      discardLocalQueueRef.current(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
       authPromptsRef.current.delete(chatId);
@@ -5644,6 +5655,7 @@ export function AgentSessionsProvider({
     invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
     invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
     sendQueueRef.current.delete(chatId);
+    discardLocalQueueRef.current(chatId);
     queueHeldRef.current.delete(chatId);
     flushBubbleRef.current.delete(chatId);
     authPromptsRef.current.delete(chatId);
@@ -6402,6 +6414,7 @@ export function AgentSessionsProvider({
         loadFlightKeysRef.current.delete(chatId);
         loadFlightAdoptOnlyRef.current.delete(chatId);
         sendQueueRef.current.delete(chatId);
+        discardLocalQueueRef.current(chatId);
         queueHeldRef.current.delete(chatId);
         flushBubbleRef.current.delete(chatId);
         authPromptsRef.current.delete(chatId);

@@ -133,8 +133,11 @@ function validEntry(value: unknown): value is LocalQueuedPrompt {
   );
 }
 
-function entriesOf(row: Row | undefined): LocalQueuedPrompt[] {
-  return Array.isArray(row?.entries) ? row.entries.filter(validEntry) : [];
+/** A row past its retention is gone even before a later write prunes it, so
+ * reading it can never bring it back with a fresh age. */
+function entriesOf(row: Row | undefined, now = Date.now()): LocalQueuedPrompt[] {
+  if (!row || typeof row.updatedAt !== "number" || now - row.updatedAt > RETAIN_MS) return [];
+  return Array.isArray(row.entries) ? row.entries.filter(validEntry) : [];
 }
 
 /** Each chat's writes apply in call order, so a slow earlier write cannot

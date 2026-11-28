@@ -37,6 +37,17 @@ describe("Local queue journal", () => {
     expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["new"]);
   });
 
+  it("never returns a queue past its retention, so reading cannot renew its age", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const journal = createMemoryLocalQueueJournal();
+      await journal.write("chat", [prompt("old")]);
+      vi.setSystemTime(new Date("2026-02-05T00:00:00Z"));
+      expect(await journal.read("chat")).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("returns copies, so later edits to a restored entry do not change the saved one", async () => {
     const journal = createMemoryLocalQueueJournal();
     await journal.write("chat", [prompt("a", "saved")]);
