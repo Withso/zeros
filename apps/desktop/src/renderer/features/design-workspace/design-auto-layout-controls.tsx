@@ -78,6 +78,8 @@ interface Props {
   onAction: (action: DesignLayoutAction) => void;
   onCommit: (styles: Record<string, string | null>) => void;
   frameSelected?: boolean;
+  /** A main component's root size is its own, not set by the canvas. */
+  componentMainSelected?: boolean;
   layoutParents?: readonly DesignRuntimeNodeDetails[];
   /** How many layers are selected; Mixed needs every one loaded. */
   selectionCount?: number;
@@ -196,6 +198,7 @@ export function DesignAutoLayoutControls({
   onAction,
   onCommit,
   frameSelected,
+  componentMainSelected,
   layoutParents,
   selectionCount = 1,
   disabled,
@@ -313,9 +316,12 @@ export function DesignAutoLayoutControls({
   const resize = (axis: DesignLayoutAxis) => {
     const dimension = axis === "x" ? "width" : "height";
     const measuredMode = designSizingMode(details, axis);
-    // The canvas sizes a frame root, so a % or custom root size reads as px.
+    // The canvas sizes a frame root, so a custom root size reads as px, and
+    // so does a % one unless the root is a main component's own size.
     const mode =
-      frameSelected && (measuredMode === "custom" || measuredMode === "relative")
+      frameSelected &&
+      (measuredMode === "custom" ||
+        (measuredMode === "relative" && !componentMainSelected))
         ? "fixed"
         : measuredMode;
     // Differing modes check nothing in the menu and show no word for one.
