@@ -303,9 +303,20 @@ export function setSidebarSectionCollapsed(section: SidebarSection, collapsed: b
 
 /** Move or hide one grouping's groups from the Group menu. `order` is the
  *  full painted order; an empty list clears it. */
+/** The stored order after the user reordered the groups a (possibly filtered)
+ * menu lists: those take their new order in the places they held, and groups
+ * the menu left out keep theirs. */
+export function mergeSidebarGroupOrder(stored: readonly string[] | undefined, next: readonly string[]): string[] {
+  if (!stored?.length) return [...next];
+  const listed = new Set(next);
+  const known = new Set(stored);
+  let index = 0;
+  return [...stored, ...next.filter((key) => !known.has(key))].map((key) => (listed.has(key) ? next[index++]! : key));
+}
+
 export function setSidebarGroupOrder(grouping: SidebarGroupingId, order: readonly string[]): void {
   const { view } = getSidebarListPreferences();
-  setSidebarView({ groupOrder: { ...view.groupOrder, [grouping]: order } });
+  setSidebarView({ groupOrder: { ...view.groupOrder, [grouping]: mergeSidebarGroupOrder(view.groupOrder[grouping], order) } });
 }
 
 export function setSidebarGroupHidden(grouping: SidebarGroupingId, key: string, hidden: boolean): void {

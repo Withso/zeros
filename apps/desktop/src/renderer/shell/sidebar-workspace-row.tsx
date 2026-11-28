@@ -326,12 +326,12 @@ export function SidebarWorkspaceRow({
   // is above the row: its repository header, or its parent in the same project.
   const dotLead = repositoryLead || (depth > 0 && sameProjectAsParent);
   const lead = sidebarRowLead({ archiving, working, dotLead, statusDot: !!statusDot, folder: localFolder, design: designWorkspace });
-  const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot });
+  const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot, folder: localFolder, design: designWorkspace });
   const statusDotLabel = rowStatus && statusDot ? rowStatus.label : undefined;
   const leadMark =
     lead === "archiving" ? <ZerosSpinner size={16} label="Archiving workspace" />
     : lead === "working" ? <AgentActivityIndicator activity={activity} />
-    : lead === "status-dot" ? <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} data-sidebar-lead-dot="status" />
+    : lead === "status-dot" ? <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} role="img" aria-label={statusDotLabel} data-sidebar-lead-dot="status" />
     : lead === "idle-dot" ? <span className={IDLE_DOT_CLS} data-sidebar-lead-dot="idle" />
     : lead === "design" ? <PenTool className="size-3.5" strokeWidth={1.25} />
     : lead === "folder" || !project ? <Folder className="size-3.5" strokeWidth={1.25} />
@@ -463,7 +463,8 @@ export function SidebarWorkspaceRow({
               <ChevronRight className={cn("hidden size-3.5 text-fg2 group-hover/lead:block group-focus-visible/lead:block", childrenExpanded && "rotate-90")} strokeWidth={1.5} aria-hidden="true" />
             </IconButton>
           ) : (
-            <span className={GLYPH_BOX_CLS} aria-hidden={lead !== "logo" || undefined} data-sidebar-lead={lead}>
+            // The logo and a status dot speak; the loaders and the idle dot are decoration.
+            <span className={GLYPH_BOX_CLS} aria-hidden={(lead !== "logo" && lead !== "status-dot") || undefined} data-sidebar-lead={lead}>
               {leadMark}
             </span>
           )}

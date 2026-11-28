@@ -168,6 +168,13 @@ describe("sidebar view preferences", () => {
     expect(view.hiddenGroups).toEqual({ status: ["archived"], pr: ["closed"] });
     prefs.setSidebarGroupHidden("status", "archived", false);
     expect(prefs.getSidebarListPreferences().view.hiddenGroups).toEqual({ pr: ["closed"] });
+    // A filtered menu reorders only the groups it lists; the others keep
+    // their stored places instead of being dropped from the order.
+    prefs.setSidebarGroupOrder("repository", ["a", "b", "c", "d"]);
+    prefs.setSidebarGroupOrder("repository", ["d", "b"]);
+    expect(prefs.getSidebarListPreferences().view.groupOrder.repository).toEqual(["a", "d", "c", "b"]);
+    prefs.setSidebarGroupOrder("repository", ["e", "a"]);
+    expect(prefs.getSidebarListPreferences().view.groupOrder.repository).toEqual(["e", "d", "c", "b", "a"]);
     values.set(KEY, JSON.stringify({ view: { groupOrder: { status: ["a", 4, "", "a"], bogus: ["x"] }, hiddenGroups: "no" } }));
     resetSidebarListPreferencesForTests();
     ({ view } = prefs.getSidebarListPreferences());

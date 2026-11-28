@@ -99,7 +99,7 @@ describe("sidebar workspace row", () => {
 
   it("puts the loader, else the status dot, at the right end of line 1 in every density", () => {
     expect(row).toContain("const statusDot = archiving ? null : sidebarStatusDot(rowStatus);");
-    expect(row).toContain("const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot });");
+    expect(row).toContain("const endMark = sidebarRowEndMark({ archiving, working, dotLead, statusDot: !!statusDot, folder: localFolder, design: designWorkspace });");
     const end = row.slice(row.indexOf('<span className={cn(SIDEBAR_WORKSPACE_TRAILING_CLS, "ml-auto")}>'));
     expect(end).toMatch(/endMark === "loader" \? \([\s\S]*?<AgentActivityIndicator activity=\{activity\} \/>/);
     expect(end).toMatch(/endMark === "dot" \? \([\s\S]*?role="img" aria-label=\{statusDotLabel\}/);

@@ -30,14 +30,17 @@ export interface SidebarWorkspaceSignal {
 export const NO_SIGNAL: SidebarWorkspaceSignal = Object.freeze({ awaiting: null, working: false, unread: false, draft: false });
 
 /** The parts of a signal that answer a setup failure, as a comparable key. */
-export function sidebarSignalKey(signal: SidebarWorkspaceSignal): string {
-  return [signal.working ? 1 : 0, signal.awaiting ?? "-", signal.unread ? 1 : 0].join("|");
+export function sidebarSignalKey(signal: SidebarWorkspaceSignal, chatIds: readonly string[] = []): string {
+  return [signal.working ? 1 : 0, signal.awaiting ?? "-", signal.unread ? 1 : 0, chatIds.join(",")].join("|");
 }
 
 /** Whether a workspace moved on since `previous` (a sidebarSignalKey): an
- *  agent started working, or a question, plan or finished turn arrived. */
-export function sidebarSignalMovedOn(previous: string, signal: SidebarWorkspaceSignal): boolean {
-  const [working, awaiting, unread] = previous.split("|");
+ *  agent started working, or a question, plan or finished turn arrived. A
+ *  change that comes with a different set of chats (chats hydrating after a
+ *  relaunch, or a cloud workspace's chats arriving) is not an answer. */
+export function sidebarSignalMovedOn(previous: string, signal: SidebarWorkspaceSignal, chatIds: readonly string[] = []): boolean {
+  const [working, awaiting, unread, chats = ""] = previous.split("|");
+  if (chats !== chatIds.join(",")) return false;
   return (signal.working && working !== "1") ||
     (signal.awaiting !== null && awaiting !== signal.awaiting) ||
     (signal.unread && unread !== "1");

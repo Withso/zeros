@@ -85,21 +85,24 @@ export function sidebarRowLead(args: {
   design: boolean;
 }): SidebarRowLead {
   if (args.archiving) return "archiving";
-  if (args.dotLead) return args.working ? "working" : args.statusDot ? "status-dot" : "idle-dot";
   if (args.folder) return "folder";
   if (args.design) return "design";
+  if (args.dotLead) return args.working ? "working" : args.statusDot ? "status-dot" : "idle-dot";
   return "logo";
 }
 
 /** The mark at the right end of line 1 (Compact: of the one line): the agent
- * loader, else the status dot. A dot lead already carries it. */
+ * loader, else the status dot. A dot lead already carries it, unless the row
+ * keeps a folder or Design mark there. */
 export function sidebarRowEndMark(args: {
   archiving: boolean;
   working: boolean;
   dotLead: boolean;
   statusDot: boolean;
+  folder?: boolean;
+  design?: boolean;
 }): "loader" | "dot" | null {
-  if (args.archiving || args.dotLead) return null;
+  if (args.archiving || (args.dotLead && !args.folder && !args.design)) return null;
   if (args.working) return "loader";
   return args.statusDot ? "dot" : null;
 }

@@ -213,6 +213,16 @@ describe("sidebar row leading slot", () => {
     expect(sidebarRowLead({ ...base, folder: true })).toBe("folder");
     expect(sidebarRowLead({ ...base, design: true })).toBe("design");
   });
+  // Under a repository header every row is a dot lead; a folder or legacy
+  // Design row keeps its own mark there, and its state moves to the end.
+  it("keeps folder and design marks under a repository header", () => {
+    expect(sidebarRowLead({ ...base, dotLead: true, folder: true, working: true })).toBe("folder");
+    expect(sidebarRowLead({ ...base, dotLead: true, design: true, statusDot: true })).toBe("design");
+    const end = { archiving: false, working: false, dotLead: true, statusDot: false, folder: false, design: false };
+    expect(sidebarRowEndMark({ ...end, folder: true, working: true })).toBe("loader");
+    expect(sidebarRowEndMark({ ...end, design: true, statusDot: true })).toBe("dot");
+    expect(sidebarRowEndMark({ ...end, working: true })).toBeNull();
+  });
 });
 
 describe("sidebar row end mark", () => {
@@ -267,6 +277,15 @@ describe("setup failure answered by a later status", () => {
     expect(sidebarSignalMovedOn(busy, signal({ working: true, awaiting: "input" }))).toBe(false);
     expect(sidebarSignalMovedOn(busy, signal({ working: true, awaiting: "input", unread: true }))).toBe(true);
     expect(sidebarSignalMovedOn(busy, signal({ awaiting: "plan" }))).toBe(true);
+  });
+  // After a relaunch the failed workspace renders before its chats hydrate;
+  // restored unread or awaiting chats are not an answer the user gave.
+  it("ignores a change that arrives with a different set of chats", () => {
+    const before = sidebarSignalKey(signal(), []);
+    expect(sidebarSignalMovedOn(before, signal({ unread: true }), ["a"])).toBe(false);
+    expect(sidebarSignalMovedOn(before, signal({ awaiting: "input" }), ["a"])).toBe(false);
+    const hydrated = sidebarSignalKey(signal(), ["a"]);
+    expect(sidebarSignalMovedOn(hydrated, signal({ working: true }), ["a"])).toBe(true);
   });
 });
 

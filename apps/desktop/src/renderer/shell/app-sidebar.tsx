@@ -514,13 +514,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     reconcileSetupFailureAcknowledgements(realWorkspaces, (id) => {
       const signal = signalLookup(id);
       const previous = seen.get(id);
-      return previous !== undefined && sidebarSignalMovedOn(previous, signal);
+      return previous !== undefined && sidebarSignalMovedOn(previous, signal, chatIdsByWorkspace.get(id));
     });
     seen.clear();
     for (const workspace of realWorkspaces) {
-      if (workspace.setupState === "failed") seen.set(workspace.id, sidebarSignalKey(signalLookup(workspace.id)));
+      if (workspace.setupState === "failed") {
+        seen.set(workspace.id, sidebarSignalKey(signalLookup(workspace.id), chatIdsByWorkspace.get(workspace.id)));
+      }
     }
-  }, [hidden, realWorkspaces, signalLookup]);
+  }, [chatIdsByWorkspace, hidden, realWorkspaces, signalLookup]);
   const ownerOf = useCallback(
     (workspace: Workspace): SidebarOwnerFilter | null => {
       if (!sharing) return "mine";
@@ -562,6 +564,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     const grouping = groupingId === "repository" ? null : groupingId;
     const thenBy = view.thenBy && view.thenBy !== groupingId && groupingId !== null ? view.thenBy : null;
     const projectRank = new Map(projects.map((project, index) => [project.id, index]));
+    // Joined Local and cloud projects share one repository sub-group, as they
+    // share one header under Group › Repository.
+    const headOf = unifiedPlacements ? projectGroupLookup(projects) : null;
+    const repositoryOf = (project: Project) => headOf?.(project.id)?.[0] ?? project;
     return {
       compare,
       hideEmptyGroups: view.hideEmptyGroups,
@@ -573,12 +579,15 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         ? {
             subGroup: (item: SidebarWorkspaceItem) =>
               thenBy === "repository"
-                ? { key: item.project.id, label: item.project.name, order: projectRank.get(item.project.id) ?? projects.length, project: item.project }
+                ? (() => {
+                    const project = repositoryOf(item.project);
+                    return { key: project.id, label: project.name, order: projectRank.get(project.id) ?? projects.length, project };
+                  })()
                 : groupOf(thenBy, item),
           }
         : {}),
     };
-  }, [activeAtByWorkspaceId, groupingId, islandOf, keepWorkspaceId, ownerOf, preferences.sort, projects, signalOfWorkspace, view.direction, view.groupOrder, view.hiddenGroups, view.hideEmptyGroups, view.needsYouFirst, view.thenBy]);
+  }, [activeAtByWorkspaceId, groupingId, islandOf, keepWorkspaceId, ownerOf, preferences.sort, projects, signalOfWorkspace, view.direction, view.groupOrder, view.hiddenGroups, view.hideEmptyGroups, view.needsYouFirst, view.thenBy, unifiedPlacements]);
   const menuCounts = useMemo(() => {
     const statuses = Object.fromEntries(SIDEBAR_AGENT_STATUS_FILTERS.map(status => [status, 0])) as Record<SidebarAgentStatusFilter, number>;
     const prStates = Object.fromEntries(SIDEBAR_PR_FILTERS.map(state => [state, 0])) as Record<SidebarPrFilter, number>;
@@ -601,9 +610,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     const count = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
     if (groupingId === "repository") {
       const groupOf = unifiedPlacements ? projectGroupLookup(projects) : null;
+      const members = (project: Project) => groupOf?.(project.id) ?? [project];
       const heads = projects.filter(project => project.isGitRepository !== false &&
-        (repositoryIds.length === 0 || repositoryIds.includes(project.id)) &&
-        (groupOf?.(project.id)?.[0]?.id ?? project.id) === project.id);
+        (members(project)[0]?.id ?? project.id) === project.id &&
+        (repositoryIds.length === 0 || members(project).some(member => repositoryIds.includes(member.id))));
       for (const workspace of shown) {
         const project = findProjectForFolder(workspace.repoRoot, projects);
         if (project) count(groupOf?.(project.id)?.[0]?.id ?? project.id);
@@ -622,12 +632,13 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         island: islandOf(workspace),
       }).key);
     }
-    const items = sidebarDefaultGroups(groupingId).map(group => ({
-      key: group.key,
-      label: group.label,
-      ...(group.key === ARCHIVED_STATUS_GROUP.key ? {} : { count: counts.get(group.key) ?? 0 }),
-    }));
-    return { grouping: groupingId, items: orderSidebarGroups(items, item => item.key, order), hidden: hiddenKeys };
+    // Archived always paints after the live groups: it can be hidden, not moved.
+    const groups = sidebarDefaultGroups(groupingId);
+    const live = groups.filter(group => group.key !== ARCHIVED_STATUS_GROUP.key)
+      .map(group => ({ key: group.key, label: group.label, count: counts.get(group.key) ?? 0 }));
+    const pinned = groups.filter(group => group.key === ARCHIVED_STATUS_GROUP.key)
+      .map(group => ({ key: group.key, label: group.label, pinned: true }));
+    return { grouping: groupingId, items: [...orderSidebarGroups(live, item => item.key, order), ...pinned], hidden: hiddenKeys };
   }, [activeAtByWorkspaceId, groupingId, hiddenPlacements, islandOf, ownerOf, projects, realWorkspaces, repositoryIds, sharing, signalOfWorkspace, unifiedPlacements, view]);
   const buildSections = useCallback((expanded: ReadonlySet<string>) => {
     const args = {
@@ -1034,7 +1045,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           aria-label={`${entry.project.name} workspaces`}
           className="flex flex-col gap-0.5 empty:hidden"
         >
-          {renderGroupRows(groupId, `repository:${entry.project.id}`, entry.items, entry.subgroups, collapsed, true)}
+          {/* Section-scoped, like group keys: collapsing a sub-group in one section leaves the others. */}
+          {renderGroupRows(groupId, `${section ? `${section}:` : ""}repository:${entry.project.id}`, entry.items, entry.subgroups, collapsed, true)}
         </div>
       </React.Fragment>
     );
