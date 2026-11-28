@@ -124,6 +124,26 @@ describe("designer layout values", () => {
     expect(updates.get("c")?.left).toBeUndefined();
   });
 
+  it("moves block-flow layers when a multi-selection is aligned", () => {
+    const first = node({ position: "static", left: "auto", width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, x: 10 };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ position: "static", left: "auto", width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, x: 100 };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.get("first")).toMatchObject({ left: "110px" });
+  });
+
   it("leaves auto-layout children out of selection distribution", () => {
     const free = node({ left: "10px" });
     free.oid = "free";

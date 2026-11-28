@@ -6601,15 +6601,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             const group = nodes[0]!;
             const parent = group.layout?.parentId ? await runtime.getNodeDetails(group.layout.parentId) : null;
             if (!parent) throw new Error("Select a group inside a container.");
-            const children = await Promise.all((group.childrenLayout?.nodeIds ?? []).map(id => runtime.getNodeDetails(id)));
+            const childIds = designTreeChildIds(selectedRuntimeTree, group.oid);
+            if (childIds.length === 0) throw new Error("The group's layers are still preparing.");
+            const children = await Promise.all(childIds.map(id => runtime.getNodeDetails(id)));
             if (children.some(node => !node)) throw new Error("The group's layers are still preparing.");
+            if (children.some(node => node?.visible === false))
+              throw new Error("Show the group's hidden layers before ungrouping it.");
             operations = designUngroupOperations(parent, group, children as DesignRuntimeNodeDetails[]);
             selectId = children[0]?.oid ?? null;
           } else {
             const parentId = nodes[0]?.layout?.parentId;
             const parent = parentId ? await runtime.getNodeDetails(parentId) : null;
             if (!parent) throw new Error("Select layers inside a container.");
-            const id = `${kind}-${crypto.randomUUID()}`;
+            const id = `selection-${kind}-${crypto.randomUUID()}`;
             operations = designWrapSelectionOperations(parent, nodes as DesignRuntimeNodeDetails[], id, kind);
             selectId = id;
           }

@@ -120,7 +120,7 @@ describe("child frame insertion", () => {
     const ops = designWrapSelectionOperations(
       parent,
       [absolute("a", 10), absolute("b", 84, 64)],
-      "group-test",
+      "selection-group-test",
       "group",
     );
     const html = ops.find((op) => op.type === "node.set-html");
@@ -138,10 +138,21 @@ describe("child frame insertion", () => {
     });
   });
 
+  it("rejects ungrouping an ordinary drawn frame", () => {
+    const drawn = {
+      ...parent,
+      oid: "frame-drawn",
+      layout: { parentId: "parent", x: 10, y: 30, parentWidth: 200, parentHeight: 200, parentDisplay: "block", parentPosition: "relative", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    expect(() => designUngroupOperations(parent, drawn, [])).toThrow(
+      /select a group/i,
+    );
+  });
+
   it("ungroups a generated wrapper by restoring children to its parent", () => {
     const group = {
       ...parent,
-      oid: "group-test",
+      oid: "selection-group-test",
       styles: { ...parent.styles, position: "absolute", left: "10px", top: "30px" },
       layout: { parentId: "parent", x: 10, y: 30, parentWidth: 200, parentHeight: 200, parentDisplay: "block", parentPosition: "relative", isContainingBlock: true },
     } as DesignRuntimeNodeDetails;
@@ -149,11 +160,11 @@ describe("child frame insertion", () => {
       ...parent,
       oid: "a",
       styles: { ...parent.styles, position: "absolute", left: "4px", top: "0px" },
-      layout: { parentId: "group-test", x: 4, y: 0, parentWidth: 138, parentHeight: 60, parentDisplay: "block", parentPosition: "absolute", isContainingBlock: true },
+      layout: { parentId: "selection-group-test", x: 4, y: 0, parentWidth: 138, parentHeight: 60, parentDisplay: "block", parentPosition: "absolute", isContainingBlock: true },
     } as DesignRuntimeNodeDetails;
     const ops = designUngroupOperations(parent, group, [child]);
     expect(ops).toContainEqual(
-      expect.objectContaining({ type: "node.delete", nodeId: "group-test" }),
+      expect.objectContaining({ type: "node.delete", nodeId: "selection-group-test" }),
     );
     expect(
       ops.find(

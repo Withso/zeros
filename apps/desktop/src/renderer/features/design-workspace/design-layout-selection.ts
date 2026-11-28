@@ -14,13 +14,7 @@ const positionAt = (
   axis: DesignLayoutAxis,
   value: number,
 ): Styles =>
-  designLayoutActionStyles(
-    {
-      ...node,
-      layout: node.layout ? { ...node.layout, [axis]: value } : undefined,
-    },
-    { type: "position", axis, value },
-  );
+  designLayoutActionStyles(node, { type: "position", axis, value });
 
 /** Alignment and distribution of the free layers in one multi-selection.
  * Layers whose auto-layout parent places them stay untouched. */

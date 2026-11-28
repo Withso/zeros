@@ -176,7 +176,7 @@ export function designUngroupOperations(
   children: readonly DesignRuntimeNodeDetails[],
 ): DesignOperation[] {
   if (
-    !/^(?:group|frame)-/.test(group.oid) ||
+    !/^(?:selection-group|selection-frame)-/.test(group.oid) ||
     group.layout?.parentId !== parent.oid ||
     children.some((child) => child.layout?.parentId !== group.oid)
   )
