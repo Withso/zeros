@@ -176,7 +176,7 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
         ...[...(prior?.live ?? [])].filter(file => visibleFiles.has(file) && !(input.covered ?? input.pictured).has(file) &&
           !(sources.has(file) && input.sourceReady?.get(file) === (available.get(file) as T & { sourceVersion?: string })?.sourceVersion)),
       ],
-      pictured: input.pictured, devicePixelRatio: input.devicePixelRatio, admitPassive: !input.gesture,
+      pictured: input.pictured, devicePixelRatio: input.devicePixelRatio, admitPassive: !input.gesture, running: prior?.live,
       sourceSurfaces: input.vectorCovered ? new Set([...sources, ...input.vectorCovered]) : sources,
       maxLive: DESIGN_MAX_LIVE_FRAMES,
     }) : new Set<string>();
