@@ -2,7 +2,7 @@
  * Display only: GitHub still decides at push and pull-request time. */
 export type GithubRepositoryAccess = "write" | "read" | "unavailable";
 
-export function githubRepositoryAccess(permissions: { admin?: boolean; maintain?: boolean; push?: boolean; pull?: boolean } | undefined): GithubRepositoryAccess {
+export function githubRepositoryAccess(permissions: { admin?: boolean | undefined; maintain?: boolean | undefined; push?: boolean | undefined; pull?: boolean | undefined } | undefined): GithubRepositoryAccess {
   if (!permissions) return "unavailable";
   if (permissions.admin || permissions.maintain || permissions.push) return "write";
   return permissions.pull ? "read" : "unavailable";
