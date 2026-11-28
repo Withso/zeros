@@ -1,0 +1,73 @@
+const permissionOptions = [
+  ["view","Can view","See the connection and repositories available to you."],
+  ["configure","Can configure","Edit the connection label and refresh its repository list."],
+  ["share","Can share","Change who in Zeros can use eligible repositories."]
+];
+
+function memberAccessLabel(grants){
+  if(grants.length===2)return "Configure & share";
+  return permissionOptions.find(([key])=>grants.includes(key))?.[1]||"Can view";
+}
+
+function MemberPermissionMenu({member,grants,change}){
+  return <DropdownMenu modal={false}>
+    <DropdownMenuTrigger asChild>
+      <Button variant="ghost" size="compact" aria-label={people[member].name+" permissions: "+memberAccessLabel(grants)}>
+        {memberAccessLabel(grants)}<ChevronDown size={13}/>
+      </Button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="end" className="permission-menu" aria-label={"Permissions for "+people[member].name}>
+      {permissionOptions.map(([key,title,hint])=><DropdownMenuCheckboxItem
+        key={key} aria-label={title} className="permission-option" checked={key==="view"||grants.includes(key)} disabled={key==="view"}
+        onSelect={event=>event.preventDefault()} onCheckedChange={checked=>{
+          if(key!=="view")change(checked?[...grants,key]:grants.filter(value=>value!==key));
+        }}>
+        <span><span>{title}</span><small>{hint}</small></span>
+      </DropdownMenuCheckboxItem>)}
+      {grants.length>0&&<><DropdownMenuSeparator/><DropdownMenuItem variant="destructive" onSelect={()=>change([])}>
+        <Trash2/>Remove direct access
+      </DropdownMenuItem></>}
+    </DropdownMenuContent>
+  </DropdownMenu>;
+}
+
+function ConnectionMembers({connection,manage,update}){
+  const [expanded,setExpanded]=useState("");
+  const [query,setQuery]=useState("");
+  const needle=query.trim().toLowerCase();
+  const roster=Object.entries(people);
+  const roles=[
+    {name:"Owners and admins",permission:"Full access",members:roster.filter(([id])=>admin(id))},
+    {name:"Members",permission:"Can view",members:roster.filter(([id])=>!admin(id))}
+  ];
+  const change=(member,grants)=>{
+    const next={...connection.grants};
+    if(grants.length)next[member]=grants;
+    else delete next[member];
+    update({...connection,grants:next});
+  };
+  return <>
+    <Heading title="Connection permissions" desc="Members inherit view access. Owners and admins can change permissions on each member’s row."/>
+    <div className="inventory minisection" aria-label="Withso connection permissions">
+      <label className="member-search"><Search size={14}/><Input type="search" appearance="inline" aria-label="Search Withso members in Zeros" placeholder="Search members…" value={query} onChange={event=>setQuery(event.target.value)}/></label>
+      {roles.map(role=>{
+        const matches=role.members.filter(([,person])=>person.name.toLowerCase().includes(needle));
+        if(!matches.length)return null;
+        const open=Boolean(needle)||expanded===role.name;
+        return <React.Fragment key={role.name}>
+          <ListRow className="role-disclosure" aria-expanded={open} onClick={()=>{setQuery("");setExpanded(open?"":role.name)}}>
+            <G n={open?"down":"chev"}/><span className="grow">{role.name}<small>Zeros role · {role.members.length} {role.members.length===1?"person":"people"}</small></span><small>{role.permission}</small>
+          </ListRow>
+          {open&&matches.map(([id,person])=>{
+            const direct=connection.grants?.[id]||[];
+            return <div key={id} className="inherited-member with-permission"><span className="avatar" aria-hidden="true">{person.initials}</span>
+              <span className="grow">{person.name}{direct.length>0&&<small>Direct grant</small>}</span>
+              {manage&&!admin(id)?<MemberPermissionMenu member={id} grants={direct} change={values=>change(id,values)}/>:<small>{admin(id)?"Full access":memberAccessLabel(direct)}</small>}
+            </div>;
+          })}
+        </React.Fragment>;
+      })}
+      {!roster.some(([,person])=>person.name.toLowerCase().includes(needle))&&<p className="empty">No matching Zeros member in Withso.</p>}
+    </div>
+  </>;
+}

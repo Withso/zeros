@@ -1,0 +1,16 @@
+ const placeRow=place=>btn('Manage '+place+' account');
+ const openPlace=async place=>placeRow(place).click();
+ const activeRows=async(text,n)=>assert.equal(await page.locator('.account-summary small').filter({hasText:text}).count(),n);
+ await org();await click('Configure account identity');await activeRows('@iamarunrk · GitHub App',2);
+ await openPlace('Local');await click('GitHub App');await click('Add GitHub account');
+ assert.equal(await btn('Personal access token').count(),1);await click('Preview timeout');await click('Try again');await authorize('arun-withso');await btn('Use GitHub App @arun-withso').waitFor();
+ assert.equal(await page.getByRole('dialog').count(),1);await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'detached'});await activeRows('@iamarunrk · GitHub App',2);
+ assert(await placeRow('Local').evaluate(el=>el===document.activeElement));
+ await openPlace('Cloud');await click('GitHub App');await click('Use GitHub App @arun-withso');await close();await activeRows('@arun-withso · GitHub App',2);
+ await openPlace('Cloud');await click('Personal access token');await click('Add token');await click('Verify token for @iamarunrk');await click('Use Personal access token @iamarunrk');await click('Add token');await click('Verify token for @arun-withso');await btn('Use Personal access token @arun-withso').waitFor();await close();await activeRows('@iamarunrk · Personal access token',2);
+ await openPlace('Local');await click('Personal access token');await click('Remove Personal access token @arun-withso');await click('Remove account');await click('GitHub CLI');await click('Use CLI');await close();await activeRows('@iamarunrk · GitHub CLI',1);await activeRows('@iamarunrk · Personal access token',1);
+ await openPlace('Cloud');assert.equal(await btn('GitHub CLI').count(),0);await click('Personal access token');assert.equal(await btn('Use Personal access token @arun-withso').count(),0);await click('GitHub App');await click('Use GitHub App @arun-withso');await close();
+ await activeRows('@arun-withso · GitHub App',1);await activeRows('@iamarunrk · GitHub CLI',1);
+ await openPlace('Local');await click('GitHub App');await click('Use GitHub App @arun-withso');await close();await activeRows('@arun-withso · GitHub App',2);
+ await openPlace('Local');await click('GitHub App');await click('Remove GitHub App @arun-withso');await click('Remove account');await close();await activeRows('No account connected',2);
+ await openPlace('Local');await click('GitHub CLI');await click('Use CLI');await close();

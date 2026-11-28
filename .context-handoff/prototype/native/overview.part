@@ -1,0 +1,30 @@
+function AccountList({rows,user,open}){
+  const {eligible}=React.useContext(AccessModel);
+  if (!rows.length) return <div className="account-list empty">No GitHub accounts connected. Add your first connection to select repositories.</div>;
+  return <div className="account-list">{rows.map(c=>{
+    const count=Object.keys(c.repos).filter(r=>owns(c,user)||eligible(c,r,user)).length;
+    const privateScope=c.scope!=="org";
+    return <ListRow key={c.id} className="account-item" onClick={()=>open(c.id)}>
+      <span className="account-names"><span className="account-login">@{c.owner}</span><small>{c.label?c.label+" · ":""}github.com · {count} {count===1?"repository":"repositories"}</small></span>
+      <span className="account-audience"><G n={privateScope?"lock":"group"}/>{privateScope?"Only you":"Withso"}</span><G n="chev"/>
+    </ListRow>;
+  })}</div>;
+}
+function GithubOverview({rows,user,allowed,setAllowed,open,detail}){
+  return <div className="github-overview">
+    <header className="integration-title"><h1><GitHubMark size={24}/>GitHub</h1>
+      <p>Connect repositories to Zeros and choose who can use them. <a href="https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party" target="_blank" rel="noreferrer">GitHub documentation<ArrowUpRight size={12}/></a></p>
+    </header>
+    <section className="integration-section"><div className="section-line">
+      <div><h2>Connections</h2><p>Your personal and organization GitHub accounts.</p></div>
+      <Button variant="primary" onClick={()=>open({type:"add",scope:user})}><Plus/>Add connection</Button>
+    </div><AccountList rows={rows} user={user} open={detail}/></section>
+    <section className="integration-section"><h2>General</h2>
+      {admin(user)&&<div className="setting-surface"><SettingsRow label={<label htmlFor="enable-private">Allow personal projects</label>} hint="Let members create private projects from their own GitHub accounts."><Switch id="enable-private" aria-label="Allow personal projects" checked={allowed} onCheckedChange={setAllowed}/></SettingsRow></div>}
+      <div className="setting-links">
+        <Button variant="ghost" onClick={()=>open({type:"identity"})}>Configure agent identity<ArrowUpRight/></Button>
+        {admin(user)&&<Button variant="ghost" onClick={()=>open({type:"mirror"})}>Access mirroring<ArrowUpRight/></Button>}
+      </div>
+    </section>
+  </div>;
+}

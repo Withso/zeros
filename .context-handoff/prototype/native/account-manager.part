@@ -1,0 +1,73 @@
+function InlineAdd({method,user,saved,onSave,onCancel,hasActive}){
+  const [pending,setPending]=useState(null),[expired,setExpired]=useState(false);
+  const logins=[people[user].login,user+"-withso"].filter(login=>!saved.some(a=>a.login===login));
+  useEffect(()=>{
+    if(!pending)return;
+    const timer=setTimeout(()=>onSave(pending),350);
+    return ()=>clearTimeout(timer);
+  },[pending]);
+  if(pending)return <p className="inline-feedback" role="status">Verifying @{pending}…</p>;
+  if(expired)return <div className="credential-row" role="status"><span className="grow">Authorization expired.</span><Button size="compact" onClick={()=>setExpired(false)}>Try again</Button><Button variant="ghost" size="compact" onClick={onCancel}>Cancel</Button></div>;
+  return <div className="inline-add">
+    <p>{method==="app"?"Choose a GitHub account to authorize.":"Choose a sample token to verify."} {hasActive?"Your active account stays selected.":"Your first account becomes active."}</p>
+    {logins.map(login=><div className="credential-row" key={login}><span className="avatar">{login.slice(0,2).toUpperCase()}</span>
+      <span className="grow">@{login}<small>{method==="pat"?"Sample token · ••••••••":login===people[user].login?"Personal account":"Work account"}</small></span>
+      <Button size="compact" aria-label={(method==="pat"?"Verify token for @":"Authorize @")+login} onClick={()=>setPending(login)}>{method==="pat"?"Verify token":"Authorize"}</Button>
+    </div>)}
+    <div className="inline-actions"><Button variant="ghost" size="compact" onClick={onCancel}>Cancel</Button>{method==="app"&&<Button variant="ghost" size="compact" onClick={()=>setExpired(true)}>Preview timeout</Button>}</div>
+  </div>;
+}
+function Identity({user,methods,place,close,change}){
+  const [expanded,setExpanded]=useState(null),[adding,setAdding]=useState(false),[confirm,setConfirm]=useState(null),[message,setMessage]=useState("");
+  const active=methods[place],login=methods[place+"Login"],localCli=place==="local"&&methods.cliLogin;
+  const choices=place==="local"?["app","pat","cli"]:["app","pat"];
+  function reset(){setAdding(false);setConfirm(null);setMessage("")}
+  function useShared(method,account){
+    change(state=>({...state,activeKey:keyFor(method,account),cliLogin:place==="local"?null:state.cliLogin}));
+    reset();setMessage("@"+account+" is active.");
+  }
+  function add(method,account){
+    change(state=>{
+      const next=saveCredential(state,method,account);
+      if(state.activeKey)return next;
+      return {...next,activeKey:keyFor(method,account),cliLogin:place==="local"?null:state.cliLogin};
+    });
+    reset();setMessage("@"+account+(methods.activeKey?" saved.":" connected."));
+  }
+  function disconnect(){
+    change(state=>localCli?{...state,cliLogin:null}:{...state,activeKey:null});
+    reset();setMessage(localCli?"GitHub CLI disconnected.":"Shared account disconnected.");
+  }
+  function remove(key){
+    change(state=>({...state,accounts:state.accounts.filter(a=>keyFor(a.method,a.login)!==key),activeKey:state.activeKey===key?null:state.activeKey}));
+    reset();setMessage("Account removed.");
+  }
+  return <Drawer label={"Integrations / GitHub / "+placeName[place]} close={close}>
+    <h2>{placeName[place]} account identity</h2><p className="info">{active?"Connected as @"+login+" using "+methodName[active]+".":"Choose an account for your workspaces."}</p>
+    <div className="account-list identity-methods">{choices.map(method=>{
+      const open=expanded===method,saved=methods.accounts.filter(a=>a.method===method);
+      return <div key={method}>
+        <ListRow className="method-option" aria-label={methodName[method]} aria-expanded={open} aria-controls={open?"inline-"+method:undefined} onClick={()=>{reset();setExpanded(open?null:method)}}>
+          <span className="service-icon">{method==="app"?<GitHubMark size={18}/>:method==="pat"?<KeyRound size={17}/>:<Terminal size={17}/>}</span>
+          <span className="grow">{methodName[method]}<small>{method==="cli"?"This Mac only":"Shared by Local and Cloud"}</small></span>
+          {active===method&&<small>Current</small>}<ChevronDown size={14} className={open?"chevron-open":""}/>
+        </ListRow>
+        {open&&<div id={"inline-"+method} className="inline-method">
+          {method==="cli"?<div className="credential-row"><span className="grow">@{people[user].login}<small>Detected on this Mac</small></span>{localCli?<span className="auth-status"><Check size={13}/>Active</span>:<Button size="compact" onClick={()=>{change(s=>({...s,cliLogin:people[user].login}));setMessage("Local now uses GitHub CLI.")}}>Use CLI</Button>}</div>:
+          <>{saved.map(account=>{
+            const key=keyFor(method,account.login),selected=methods.activeKey===key;
+            return <React.Fragment key={key}><div className="credential-row"><span className="avatar">{account.login.slice(0,2).toUpperCase()}</span>
+              <span className="grow">@{account.login}<small>{selected?(methods.cliLogin?"Active in Cloud":"Active in Local and Cloud"):"Saved account"}</small></span>
+              {selected&&!localCli?<span className="auth-status"><Check size={13}/>Active</span>:<Button size="compact" aria-label={"Use "+methodName[method]+" @"+account.login} onClick={()=>useShared(method,account.login)}>{selected?"Use on this Mac":"Use account"}</Button>}
+              <Button size="icon" variant="ghost" aria-label={"Remove "+methodName[method]+" @"+account.login} onClick={()=>{setConfirm(key);setAdding(false)}}><X size={13}/></Button>
+            </div>{confirm===key&&<div className="credential-confirm"><p>{selected?"Remove the active account? Workspaces using it will need another account.":"Remove @"+account.login+" from your saved accounts?"}</p><div className="inline-actions"><Button size="compact" variant="ghost" onClick={()=>setConfirm(null)}>Cancel</Button><Button size="compact" variant="destructive-secondary" onClick={()=>remove(key)}>Remove account</Button></div></div>}</React.Fragment>;
+          })}
+          {adding?<InlineAdd method={method} user={user} saved={saved} hasActive={Boolean(methods.activeKey)} onCancel={()=>setAdding(false)} onSave={account=>add(method,account)}/>:
+          saved.length<2&&<Button size="compact" variant="ghost" onClick={()=>{setAdding(true);setConfirm(null);setMessage("")}}><Plus size={13}/>{method==="app"?"Add GitHub account":"Add token"}</Button>}</>}
+        </div>}
+      </div>;
+    })}</div>
+    {message&&<p className="inline-feedback" role="status">{message}</p>}
+    {active&&(confirm==="disconnect"?<div className="credential-confirm"><p>{localCli?"Disconnect CLI on this Mac? Local will follow the shared account.":"Disconnect the shared account? Saved accounts and GitHub installations stay available."}</p><div className="inline-actions"><Button variant="ghost" size="compact" onClick={()=>setConfirm(null)}>Cancel</Button><Button variant="destructive-secondary" size="compact" onClick={disconnect}>Confirm disconnect</Button></div></div>:<div className="actions"><Button variant="ghost" onClick={()=>{setAdding(false);setConfirm("disconnect")}}>{localCli?"Disconnect GitHub CLI":"Disconnect shared account"}</Button></div>)}
+  </Drawer>;
+}

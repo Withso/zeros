@@ -1,0 +1,32 @@
+function MirroredRepositories({connection,visible,user,canLimit,changeLimit,options}){
+ const {eligible,access}=React.useContext(AccessModel);
+ const [expanded,setExpanded]=useState(null);
+ const reviewers=canLimit||owns(connection,user)?Object.keys(people):[user];
+ return <section className="block">
+   <Heading title="Repository access" desc="Expand a repository to see its GitHub permissions and effective access in Zeros."/>
+   <div className="inventory minisection">
+     {visible.map(repo=>{
+       const open=expanded===repo;
+       const count=reviewers.filter(member=>eligible(connection,repo,member)).length;
+       return <React.Fragment key={repo}>
+         <ListRow className="mirror-repo" aria-expanded={open} onClick={()=>setExpanded(open?null:repo)}>
+           <G n={open?"down":"chev"}/><span className="grow">{repo}</span>
+           <small>{reviewers.length===1?"Your access":count+" "+(count===1?"member":"members")}</small>
+         </ListRow>
+         {open&&<div className="mirror-details">
+           <table aria-label={"Effective access for "+repo}><thead><tr><th>Member</th><th>GitHub</th><th>In Zeros</th></tr></thead>
+             <tbody>{reviewers.map(member=>{
+               const permission=access(repo,member);
+               const level=permission==="write"?"Write":permission==="read"?"Read":"No access";
+               return <tr key={member}><th scope="row">{people[member].name}</th><td>{level}</td><td>{eligible(connection,repo,member)?level:"No access"}</td></tr>;
+             })}</tbody>
+           </table>
+           <div className="limit-row"><span>Zeros audience limit</span>{canLimit?<Picker quiet label={"Zeros limit for "+repo} value={connection.repos[repo]} items={options} set={v=>changeLimit(repo,v)}/>:<small>{audienceName(connection.repos[repo])}</small>}</div>
+           <a className="mirror-link" href={"https://github.com/"+repo} target="_blank" rel="noreferrer">View repository on GitHub <ArrowUpRight size={12}/></a>
+         </div>}
+       </React.Fragment>;
+     })}
+     {!visible.length&&<p className="empty">No eligible repositories.</p>}
+   </div>
+ </section>;
+}

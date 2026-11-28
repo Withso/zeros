@@ -1,0 +1,53 @@
+const seedInstalls={
+  Withso:Object.keys(seedConnections[0].repos),
+  iamarunrk:Object.keys(seedConnections[1].repos),
+  Northstar:["Northstar/dashboard"]
+};
+function authorizedFor(login,owner){
+  return Boolean(login)&&(!login.endsWith("-withso")||owner==="Withso");
+}
+function LinkInstallation({connection,user,methods,authorize,done,close}){
+  const [error,setError]=useState(false);
+  return <Drawer label={"Connections / @"+connection.owner} close={close}>
+    {error?<><h2>Account can’t link this installation</h2><p className="info">Use a GitHub identity with access to @{connection.owner}. The existing installation is still connected to Withso.</p><Button onClick={()=>setError(false)}>Choose another account</Button></>:
+    <><div className="link-info"><G n="link"/><span>Zeros is already installed on @{connection.owner}. Link your account to continue.</span></div>
+    <AccountChooser user={user} saved={Boolean(methods.cloud)} cancel={close} onSelect={id=>{
+      if(!authorizedFor(id,connection.owner)){setError(true);return}
+      authorize(id);done();
+    }}/></>}
+  </Drawer>;
+}
+function AddConnection({user,scope,connections,installs,recordInstall,methods,authorize,save,close}){
+ const [dest,setDest]=useState(scope),[owner,setOwner]=useState(""),[step,setStep]=useState("destination"),[chosen,setChosen]=useState([]),[aud,setAud]=useState(user);
+ const options=(dest==="org"?["Withso","Studio-Labs","Northstar",people[user].login]:(admin(user)?[people[user].login,"arun-labs"]:[people[user].login])).filter(o=>!connections.some(c=>c.scope===dest&&c.owner===o));
+ const account=options.includes(owner)?owner:options[0];
+ const installed=installs[account];
+ const list=installed||catalog[account]?.map(r=>account+"/"+r[0])||[];
+ function resume(login){
+   setChosen([]);
+   if(!authorizedFor(login,account)){setStep(installed?"denied":"approval");return}
+   setStep(installed?"existing":"install");
+ }
+ function approveRepoSelection(){
+   if(!installed)recordInstall(account,chosen);
+   setStep("review");
+ }
+ function finish(){
+   save({id:mkId(),owner:account,scope:dest,repos:Object.fromEntries(chosen.map(r=>[r,dest==="org"?aud:user]))});
+ }
+ return <Drawer label="Add GitHub connection" close={close}>
+   {step==="destination"?<><h2>Add GitHub connection</h2><label className="formlabel">Who is this for?</label>
+     <Seg value={dest} items={[[user,"Only you"],...(admin(user)?[["org","Withso"]]:[])]} set={v=>{setDest(v);setOwner("");setChosen([])}}/>
+     <p className="info">{dest==="org"?"Share selected repositories with eligible Withso members.":"Keep this connection in your personal repository list."}</p>
+     <label className="formlabel">GitHub account or organization</label>{account?<Picker label="GitHub account" value={account} items={options.map(o=>[o,"@"+o])} set={setOwner}/>:<p className="muted">All available accounts are connected here.</p>}
+     <div className="actions"><Button variant="primary" disabled={!account} onClick={()=>methods.appLogin?resume(methods.appLogin):setStep("authorize")}>Continue</Button></div></>:
+   step==="authorize"?<><p className="link-info">Link a GitHub account to continue setup for @{account}.</p><AccountChooser user={user} saved={Boolean(methods.cloud)} cancel={()=>setStep("destination")} onSelect={id=>{authorize(id);resume(id)}}/></>:
+   step==="approval"||step==="denied"?<><h2>{step==="approval"?"GitHub owner approval required":"Installation unavailable to this account"}</h2><p className="info">@{methods.appLogin} needs {step==="approval"?"installation approval":"access"} from @{account}. You can continue with an authorized account.</p><Button onClick={()=>setStep("authorize")}>Choose another account</Button></>:
+   step==="existing"||step==="install"?<><h2>{step==="existing"?"Link existing installation":"Install Zeros on GitHub"}</h2>
+     <p className="info">{step==="existing"?"Zeros is already installed on @"+account+". Select which authorized repositories to link here.":"Choose repositories on @"+account+" for this simulated GitHub App installation."}</p>
+     <CheckList items={list} chosen={chosen} set={setChosen}/><div className="actions"><Button onClick={()=>setStep("destination")}>Back</Button><Button variant="primary" disabled={!chosen.length} onClick={approveRepoSelection}>{step==="existing"?"Link selection":"Install and continue"}</Button></div></>:
+   <><h2>Review repository access</h2><p className="info">Confirm who can use the selected repositories in Zeros.</p><div className="setting-surface"><Row title="Destination"><Scope scope={dest}/></Row>{chosen.map(r=><Row key={r} title={r}/>)}</div>
+     {dest==="org"&&<><label className="formlabel">Initial repository audience</label><Picker label="Initial repository audience" value={aud} items={["arun","maya","all"].map(v=>[v,audienceName(v)])} set={setAud}/></>}
+     <div className="actions"><Button onClick={()=>setStep("existing")}>Back</Button><Button variant="primary" onClick={finish}>Save connection</Button></div></>}
+ </Drawer>;
+}

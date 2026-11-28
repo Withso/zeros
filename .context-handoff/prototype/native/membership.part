@@ -1,0 +1,55 @@
+const connectionPermissions = [
+  ["view","Can view"],["configure","Can configure"],["share","Can share"]
+];
+
+function ConnectionMembers({connection,manage,update}){
+ const [expanded,setExpanded]=useState("");
+ const [adding,setAdding]=useState(false);
+ const [query,setQuery]=useState("");
+ const [selected,setSelected]=useState("");
+ const [permission,setPermission]=useState("configure");
+ const grants=connection.grants||{};
+ const roster=Object.entries(people);
+ const roles=[
+   {name:"Owners and admins",permission:"Full access",members:roster.filter(([,p])=>p.role==="Admin"||p.role==="Owner")},
+   {name:"Members",permission:"Can view",members:roster.filter(([,p])=>p.role==="Member")}
+ ];
+ const matches=roster.filter(([,p])=>p.name.toLowerCase().includes(query.trim().toLowerCase()));
+ const changeGrant=(id,value)=>{
+   const next={...grants};
+   if(value==="remove")delete next[id];
+   else next[id]=value;
+   update({...connection,grants:next});
+ };
+ function togglePicker(){
+   setAdding(!adding);setSelected("");setQuery("");setPermission("configure");
+ }
+ return <>
+   <Heading title="Connection permissions" desc="Withso roles and individual grants in Zeros.">
+     {manage&&<Button variant="ghost" size="icon" aria-label="Add a Zeros member" aria-expanded={adding} onClick={togglePicker}><Plus/></Button>}
+   </Heading>
+   {adding&&<div className="member-picker">
+     <label className="member-search"><Search size={14}/><Input type="search" appearance="inline" aria-label="Search Withso members in Zeros" placeholder="Search Withso members in Zeros…" value={query} onChange={e=>{setQuery(e.target.value);setSelected("")}}/></label>
+     {matches.map(([id,p])=>{
+       const reason=admin(id)?"Full access via role":grants[id]?"Already has a direct grant":"";
+       return <ListRow key={id} disabled={Boolean(reason)} aria-pressed={selected===id} className="member-choice" onClick={()=>setSelected(id)}>
+         <span className="avatar">{p.initials}</span><span className="grow">{p.name}<small>{reason||"Zeros member"}</small></span>{selected===id&&<Check size={14}/>}
+       </ListRow>;
+     })}
+     {!matches.length&&<p className="empty">No matching Zeros member in Withso.</p>}
+     {selected&&<div className="picker-footer"><Picker label="New connection permission" value={permission} items={connectionPermissions} set={setPermission}/><Button variant="primary" onClick={()=>{changeGrant(selected,permission);togglePicker()}}>Add grant</Button></div>}
+   </div>}
+   <div className="inventory minisection" aria-label="Inherited Zeros roles">
+     {roles.map(role=><React.Fragment key={role.name}>
+       <ListRow className="role-disclosure" aria-expanded={expanded===role.name} onClick={()=>setExpanded(expanded===role.name?"":role.name)}>
+         <G n={expanded===role.name?"down":"chev"}/><span className="grow">{role.name}<small>Zeros role · {role.members.length} {role.members.length===1?"person":"people"}</small></span><small>{role.permission}</small>
+       </ListRow>
+       {expanded===role.name&&role.members.map(([id,p])=><div key={id} className="inherited-member"><span className="avatar">{p.initials}</span><span>{p.name}</span></div>)}
+     </React.Fragment>)}
+   </div>
+   {Object.keys(grants).length>0&&<><h3 className="grant-label">Individual grants</h3><div className="inventory">{Object.entries(grants).map(([id,value])=>
+     <div className="grantrow" key={id}><span className="avatar">{people[id].initials}</span><span className="grow">{people[id].name}<small>Direct grant</small></span>
+       {manage?<Picker quiet label={people[id].name+" connection permission"} value={value} items={[...connectionPermissions,["remove","Remove direct grant"]]} set={v=>changeGrant(id,v)}/>:<small>{connectionPermissions.find(([v])=>v===value)?.[1]}</small>}
+     </div>)}</div></>}
+ </>;
+}

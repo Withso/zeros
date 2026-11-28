@@ -1,0 +1,19 @@
+const placeName={local:"Local",cloud:"Cloud"};
+const methodName={app:"GitHub App",pat:"Personal access token",cli:"GitHub CLI"};
+const keyFor=(method,login)=>method+"/"+login;
+function makeIdentity(user,connected=true,cli=false){
+  const login=people[user].login;
+  return {accounts:connected?[{method:"app",login}]:[],activeKey:connected?keyFor("app",login):null,cliLogin:cli?login:null};
+}
+const initialIdentities=Object.fromEntries(["arun","maya"].map(user=>[user,makeIdentity(user)]));
+function identityView(state){
+  const active=state.accounts.find(a=>keyFor(a.method,a.login)===state.activeKey);
+  const appLinked=active&&state.accounts.some(a=>a.method==="app"&&a.login===active.login);
+  return {...state,cloud:active?.method,cloudLogin:active?.login,
+    local:state.cliLogin?"cli":active?.method,localLogin:state.cliLogin||active?.login,
+    appLogin:appLinked?active.login:null};
+}
+function saveCredential(state,method,login){
+  const exists=state.accounts.some(a=>a.method===method&&a.login===login);
+  return exists?state:{...state,accounts:[...state.accounts,{method,login}]};
+}
