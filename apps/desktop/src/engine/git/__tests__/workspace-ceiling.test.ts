@@ -31,6 +31,7 @@ describe("withWorkspaceCeiling", () => {
     expect(withWorkspaceCeiling({}, `${odd}/..notes`).GIT_CEILING_DIRECTORIES).toBe("/outer");
     expect(withWorkspaceCeiling({}, "/elsewhere", ["-C", `${odd}/repo/broken`, "status"]).GIT_CEILING_DIRECTORIES).toBe("/outer");
     expect(withWorkspaceCeiling({}, `${odd}/repo`, ["-C", "/elsewhere", "status"]).GIT_CEILING_DIRECTORIES).toBeUndefined();
+    expect(withWorkspaceCeiling({}, "/elsewhere", ["--config-env", "core.pager=PAGER", "-C", `${odd}/repo`, "status"]).GIT_CEILING_DIRECTORIES).toBe("/outer");
   });
 });
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runGit, runGitProbeSync } from "../git-exec";
+import { runFile, runGit, runGitProbeSync } from "../git-exec";
 import { setStateRootForTesting, worktreesRoot } from "../state";
 
 // Fixture Git must never follow an inherited repository selection (for example
@@ -60,6 +60,8 @@ describe("runGit inside the managed workspaces root", () => {
     await expect(runGit(broken, ["status", "--porcelain"])).rejects.toThrow();
     await expect(runGit(broken, ["add", "--", "work.txt"])).rejects.toThrow();
     expect(() => runGitProbeSync(broken, "rev_parse", ["rev-parse", "--show-toplevel"])).toThrow();
+    // Callers such as isRepo pass the folder through -C with no cwd.
+    await expect(runFile("git", ["-C", broken, "rev-parse", "--show-toplevel"])).rejects.toThrow();
     // The enclosing repository was never touched.
     expect(git(enclosing, "diff", "--cached", "--name-only")).toBe("");
   });

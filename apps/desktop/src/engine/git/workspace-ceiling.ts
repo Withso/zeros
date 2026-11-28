@@ -78,7 +78,7 @@ export function effectiveGitDirectory(cwd: string | undefined, args: readonly st
     if (arg === "-C" && index + 1 < args.length) {
       const next = args[++index]!;
       if (next) dir = path.resolve(dir ?? process.cwd(), next);
-    } else if (arg === "-c" || arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace") {
+    } else if (arg === "-c" || arg === "--config-env" || arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace") {
       index++;
     } else if (!arg.startsWith("-")) break;
   }
