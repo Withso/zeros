@@ -143,7 +143,7 @@ export function GithubConnectionGroups({ userId, organizationId, organizationNam
       </SettingsGroup>)}
     </SettingsSection>
     {active && showDetails && selected && <GithubConnectionDrawer key={selected.id} userId={userId} organizationId={organizationId}
-      connection={selected} canManage={selected.level === "personal" || canManage} personal={personal} accountLogin={appLogin} accessNotice={accessNotice} credentialGeneration={status?.generation} installUrl={installUrl}
+      connection={selected} canManage={selected.level === "personal" || canManage} personal={personal} accountLogin={appLogin} accountType={visible.data?.find(item => item.installationId === selected.installationId)?.accountType} accessNotice={accessNotice} credentialGeneration={status?.generation} installUrl={installUrl}
       onChanged={levels.refresh} onClose={close} />}
     {active && !showDetails && (sheet?.kind === "add" || ((sheet?.kind === "link" || sheet?.kind === "reinstall") && selected)) &&
       <AddConnection key={selected?.id ?? "add"} userId={userId} organizationId={organizationId} organizationName={organizationName}
@@ -162,10 +162,8 @@ function AddConnection({ userId, organizationId, organizationName, canManage, co
   const [level, setLevel] = useState<Level>(target?.level ?? "personal");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const connected = new Set([...connections.organization, ...connections.personal].map(row => row.installationId));
-  const login = status?.methods["github-app"].login?.toLowerCase();
   const choices = (visible.data ?? []).filter(row => !row.suspended && !connected.has(row.installationId) &&
-    (!target || target.accountLogin.toLowerCase() === row.accountLogin.toLowerCase()) &&
-    (level !== "organization" || row.accountLogin.toLowerCase() !== login));
+    (!target || target.accountLogin.toLowerCase() === row.accountLogin.toLowerCase()));
   const existing = target?.installationId != null && !reinstalling;
   const replacement = reinstalling && target && visible.data?.some(row => row.installationId !== target.installationId &&
     row.accountLogin.toLowerCase() === target.accountLogin.toLowerCase());

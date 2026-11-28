@@ -23,7 +23,7 @@ export type ProjectRouteDeps = {
   /** An installation of the Zeros App that the caller's own GitHub sign-in can see. */
   visibleInstallation(organizationId: string, userId: string, installationId: number): Promise<{ accountLogin: string; suspended: boolean }>;
   /** Installations of the Zeros App the caller's own GitHub sign-in can see, to connect one. */
-  visibleInstallations(organizationId: string, userId: string): Promise<{ installationId: number; accountLogin: string; suspended: boolean }[]>;
+  visibleInstallations(organizationId: string, userId: string): Promise<{ installationId: number; accountLogin: string; accountType?: "User" | "Organization"; suspended: boolean }[]>;
   /** Repositories the caller can read through one installation, a page at a time. */
   installationRepositories(organizationId: string, userId: string, installationId: number, page: number):
     Promise<{ repositories: { id: string; repository: string; defaultBranch: string; private: boolean }[]; nextPage: number | null }>;

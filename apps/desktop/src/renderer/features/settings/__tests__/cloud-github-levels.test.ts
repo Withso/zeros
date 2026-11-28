@@ -187,6 +187,51 @@ describe("GitHub at two levels in Settings", () => {
     expect(fixtures.open).toHaveBeenCalledWith("https://github.com/settings/installations/501");
   });
 
+  it("offers an installation on the caller's own GitHub account at the organization level", async () => {
+    fixtures.connections = { organization: [], personal: [], solo: false };
+    fixtures.connect.mockClear();
+    fixtures.visible.push({ installationId: 902, accountLogin: "octo", suspended: false });
+    try {
+      await page("own-account-admin", true);
+      await click("Add connection");
+      await click("Withso");
+      await click("Link @octo");
+      expect(fixtures.connect).toHaveBeenCalledExactlyOnceWith(ORG, 902, "organization");
+    } finally { fixtures.visible.pop(); }
+  });
+
+  it("reads a suspended connection's repositories live instead of trusting the saved state", async () => {
+    fixtures.connections = { organization: [connection("77777777-7777-4777-8777-777777777771", "acme", "organization", "suspended", 900)], personal: [], solo: false };
+    fixtures.visible.push({ installationId: 900, accountLogin: "acme", suspended: false });
+    fixtures.drawer = { repositories: [{ id: "9", repository: "acme/after-unsuspend", defaultBranch: "main", private: true, projects: [] }] };
+    try {
+      await page("unsuspended", false);
+      await click("View @acme");
+      const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find(el => el.textContent === "Repositories")!;
+      await act(async () => tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(document.body.textContent).toContain("acme/after-unsuspend");
+      expect(document.body.textContent).not.toContain("Installation unavailable");
+    } finally { fixtures.visible.pop(); await click("Close"); }
+  });
+
+  it.each([
+    ["an organization", "acme-org", "Organization", "https://github.com/organizations/acme-org/settings/installations/950"],
+    ["the signed-in user", "octo", "User", "https://github.com/settings/installations/950"],
+    ["another user", "previous-user", "User", "https://github.com/apps/fixture/installations/new"],
+    ["an account of unknown type", "someone", undefined, "https://github.com/apps/fixture/installations/new"],
+  ] as const)("opens Manage on GitHub at the right page for %s", async (_name, account, accountType, url) => {
+    fixtures.connections = { organization: [], personal: [connection("77777777-7777-4777-8777-777777777772", account, "personal", "active", 950)], solo: false };
+    fixtures.visible.push({ installationId: 950, accountLogin: account, suspended: false, ...(accountType ? { accountType } : {}) } as never);
+    fixtures.open.mockClear();
+    try {
+      await page("manage-" + account, false);
+      await click("View @" + account);
+      await click("Manage on GitHub");
+      expect(fixtures.open).toHaveBeenCalledExactlyOnceWith(url);
+    } finally { fixtures.visible.pop(); await click("Close"); }
+  });
+
   it("names each GitHub edge state with one fix", () => {
     expect(connectionStateHint({ state: "suspended", accountLogin: "withso", installationId: 1 })).toBe("Suspended in GitHub. Unsuspend the Zeros App there.");
     expect(connectionStateHint({ state: "uninstalled", accountLogin: "withso", installationId: 1 })).toBe("The Zeros App was uninstalled. Install it again in GitHub.");

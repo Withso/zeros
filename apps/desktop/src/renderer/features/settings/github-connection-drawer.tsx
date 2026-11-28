@@ -16,23 +16,25 @@ export const connectionRepositoriesCache = new KeyedAsyncCache<CloudGithubConnec
 export const connectionRepositoryPageKey = (userId: string, organizationId: string, connectionId: string, page: number, generation?: string) =>
   JSON.stringify([userId, organizationId, connectionId, page, generation]);
 
-export function GithubConnectionDrawer({ userId, organizationId, connection, canManage, personal, accountLogin, credentialGeneration, installUrl, accessNotice, onChanged, onClose }: {
+export function GithubConnectionDrawer({ userId, organizationId, connection, canManage, personal, accountLogin, accountType, credentialGeneration, installUrl, accessNotice, onChanged, onClose }: {
   userId: string; organizationId: string; connection: CloudGithubLevelConnection; canManage: boolean; personal: boolean;
-  accessNotice: ReactNode; accountLogin: string | undefined; credentialGeneration: string | undefined; installUrl: string | null | undefined; onChanged(): void; onClose(): void;
+  accessNotice: ReactNode; accountLogin: string | undefined; accountType?: "User" | "Organization" | undefined; credentialGeneration: string | undefined; installUrl: string | null | undefined; onChanged(): void; onClose(): void;
 }) {
   const [tab, setTab] = useState("general");
   const [page, setPage] = useState(1);
   const [confirm, setConfirm] = useState(false), [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const key = connectionRepositoryPageKey(userId, organizationId, connection.id, page, credentialGeneration);
-  const readable = connection.installationId !== null && connection.state === "active";
+  // A saved suspension can be stale after the App is unsuspended on GitHub; the live read decides.
+  const readable = connection.installationId !== null && connection.state !== "uninstalled";
   const read = useRecoveringRead(connectionRepositoriesCache, key,
     () => getCloudGithubConnectionRepositories(organizationId, connection.id, page),
     { enabled: tab === "repositories" && readable && !accessNotice, maxAgeMs: 15_000 });
   // The placement (Only you or organization) is independent of the installation owner.
   const manageUrl = !connection.installationId ? installUrl
     : connection.accountLogin.toLowerCase() === accountLogin?.toLowerCase() ? `https://github.com/settings/installations/${connection.installationId}`
-    : accountLogin ? `https://github.com/organizations/${encodeURIComponent(connection.accountLogin)}/settings/installations/${connection.installationId}`
+    // Only an organization's installation has an organization settings page; GitHub's install page lists the rest.
+    : accountType === "Organization" ? `https://github.com/organizations/${encodeURIComponent(connection.accountLogin)}/settings/installations/${connection.installationId}`
     : installUrl;
   const nextPage = read.data?.nextPage;
   const disconnect = async () => {

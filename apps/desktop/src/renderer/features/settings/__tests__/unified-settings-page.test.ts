@@ -105,8 +105,8 @@ vi.mock("../migrate-legacy", () => ({ ensureSettingsTomlMigrated: vi.fn() }));
 vi.mock("../cloud-github-levels", () => ({
   useGithubLevels: () => ({ connections: state.githubLevels && { organization: [], personal: [], solo: state.githubLevels.solo },
     repositories: state.githubLevels && { shared: [], private: [], personalAllowed: true }, refresh: () => {} }),
-  GithubConnectionGroups: ({ organizationName, personal }: { organizationName: string; personal?: boolean }) =>
-    `github-levels-fixture:organization:${personal ? "Projects" : organizationName} github-levels-fixture:personal:Only you`,
+  GithubConnectionGroups: ({ organizationName, personal, onConfigureIdentity }: { organizationName: string; personal?: boolean; onConfigureIdentity?: () => void }) =>
+    `github-levels-fixture:organization:${personal ? "Projects" : organizationName} github-levels-fixture:personal:Only you identity:${typeof onConfigureIdentity}`,
   PersonalProjectsSetting: () => "personal-repositories-fixture",
 }));
 vi.mock("../project-page", async (original) => ({
@@ -335,6 +335,8 @@ describe("unified Settings rail", () => {
     expect(githubEntries()).toBe(0);
     expect(container.textContent).toContain("github-levels-fixture:organization:Withso");
     expect(container.textContent).toContain("github-levels-fixture:personal:Only you");
+    // The identity controls are on this page, so the connections' identity action must lead there.
+    expect(container.textContent).toContain("identity:function");
     state.githubLevels = null;
   });
 

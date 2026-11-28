@@ -48,6 +48,8 @@ const DrawerSchema = z.object({
 }).passthrough();
 export type CloudGithubConnectionRepositories = z.infer<typeof DrawerSchema>;
 const InstallationsSchema = z.object({ installations: z.array(z.object({ installationId: z.number().int().positive(), accountLogin: z.string().max(100),
+  /** Older control planes omit it. */
+  accountType: z.enum(["User", "Organization"]).optional().catch(undefined),
   suspended: z.boolean() }).passthrough()).max(1000) }).passthrough();
 export type CloudGithubVisibleInstallation = z.infer<typeof InstallationsSchema>["installations"][number];
 
