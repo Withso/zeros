@@ -185,4 +185,26 @@ export async function runDesignCanvasCursorSmoke({ page, check }) {
       turned.every(({ cursor, degrees }) => cursor === `rotate-${Math.round((180 + degrees) / 15) * 15}`),
     JSON.stringify(turned),
   );
+
+  // A drawing tool's crosshair over a group's handle means a press there
+  // never resizes the selected layers.
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-panel"]').click({ modifiers: ["Shift"] });
+  const group = page.locator("[data-design-multi-selection]");
+  await expect(group).toHaveCount(1);
+  await page.locator("[data-design-canvas-viewport]").focus();
+  await page.keyboard.press("r");
+  const groupBefore = await group.boundingBox();
+  const corner = centre(await group.locator('.zd-design-selection-handle[aria-label$=" from se"]').boundingBox());
+  await page.mouse.move(corner.x, corner.y);
+  await page.mouse.down();
+  await page.mouse.move(corner.x + 40, corner.y + 40, { steps: 4 });
+  await page.mouse.up();
+  await settle();
+  const groupAfter = (await group.count()) ? await group.boundingBox() : null;
+  await page.keyboard.press("Escape");
+  check(
+    "a drawing tool's press on a group handle leaves the selected layers' size alone",
+    !!groupAfter && Math.abs(groupAfter.width - groupBefore.width) < 1 && Math.abs(groupAfter.height - groupBefore.height) < 1,
+    JSON.stringify({ groupBefore, groupAfter }),
+  );
 }

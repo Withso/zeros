@@ -5378,6 +5378,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (
         !workspaceId ||
         !active ||
+        activeTool !== "select" ||
         !event.isPrimary ||
         event.button !== 0 ||
         nodes.length === 0 ||
@@ -5697,6 +5698,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     },
     [
       active,
+      activeTool,
       canvasFoundation.data,
       liveDesignZoom,
       parentOutlineDetails,
