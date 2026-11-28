@@ -1,0 +1,9 @@
+{
+  "id": "design-frame-root-percent-width-unit",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1361",
+  "symptom": "A Design frame whose root is written at width:100% (a new Rectangle frame) showed its measured px width with a % sizing word in the Style inspector, W 270 %.",
+  "rule": "The canvas sizes a frame root, so the inspector reads its % or custom size as px; a main component's root keeps Relative because its size is its own. See playbooks/bug-fix.md.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-auto-layout-live-sizing.test.ts"
+}
