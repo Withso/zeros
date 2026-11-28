@@ -32,6 +32,8 @@ describe("design fill values", () => {
       end: "#ffffff", // check:ui ignore-line (authored CSS fixture)
       startPosition: "0%",
       endPosition: "100%",
+      startPositionAuthored: true,
+      endPositionAuthored: true,
       repeating: false,
     });
     expect(
@@ -136,6 +138,21 @@ describe("design fill values", () => {
     expect(formatDesignGradient(parsed!)).toBe(
       "linear-gradient(90deg, /* accent */ var(--accent) 0%, blue 100%)",
     );
+  });
+
+  it("fails closed when a color token supplies hidden stop positions", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+        "linear-gradient(90deg, rgb(81, 81, 204) 0%, rgb(81, 81, 204) 30%, rgb(81, 81, 204) 70%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+        "linear-gradient(90deg, rgb(81, 81, 204) 20%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
   });
 
   it("fails closed for gradients the two-stop editor cannot preserve", () => {

@@ -7,6 +7,8 @@ export interface DesignGradientValue {
   end: string;
   startPosition?: string;
   endPosition?: string;
+  startPositionAuthored?: boolean;
+  endPositionAuthored?: boolean;
   repeating?: boolean;
 }
 
@@ -102,7 +104,7 @@ function stripCssComments(value: string): string {
 function parseStop(
   value: string,
   fallbackPosition: string,
-): { color: string; position: string } | null {
+): { color: string; position: string; positionAuthored: boolean } | null {
   const splitAt = lastTopLevelWhitespace(value);
   const possiblePosition = splitAt >= 0 ? value.slice(splitAt).trim() : "";
   // A trailing var() can be a position only when a real color precedes it;
@@ -124,6 +126,7 @@ function parseStop(
   return {
     color,
     position: hasPosition ? possiblePosition : fallbackPosition,
+    positionAuthored: hasPosition,
   };
 }
 
@@ -213,6 +216,8 @@ export function parseDesignGradient(value: string): DesignGradientValue | null {
     end: end.color,
     startPosition: start.position,
     endPosition: end.position,
+    startPositionAuthored: start.positionAuthored,
+    endPositionAuthored: end.positionAuthored,
     repeating: input.repeating,
   };
 }
@@ -226,8 +231,19 @@ export function parseEditableDesignGradient(
 ): DesignGradientValue | null {
   const parsed = parseDesignGradient(value);
   if (!parsed) return null;
-  const tokenAngle = typeof parsed.angle === "string" && angleToken(parsed.angle);
-  return tokenAngle && !parseDesignGradient(resolvedValue) ? null : parsed;
+  const resolved = parseDesignGradient(resolvedValue);
+  if (!resolved) return null;
+  for (const key of ["start", "end"] as const) {
+    const position = parsed[`${key}Position`];
+    const tokenColor = parsed[key].toLocaleLowerCase().includes("var(");
+    if (
+      tokenColor &&
+      parsed[`${key}PositionAuthored`] === false &&
+      position !== resolved[`${key}Position`]
+    )
+      return null;
+  }
+  return parsed;
 }
 
 function number(value: number): string {
