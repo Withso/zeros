@@ -904,6 +904,10 @@ function AgentChatBody({
   }, [capabilitiesBridge, chatId]);
   const enterDesignMode = useCallback(() => changeComposerMode("design"), [changeComposerMode]);
   const leaveDesignMode = useCallback(() => changeComposerMode("code"), [changeComposerMode]);
+  const activateDesignMode = useCallback(() => {
+    composerFocusRef.current();
+    enterDesignMode();
+  }, [enterDesignMode]);
   const designFrameContext = useComposerDesignFrame({
     chatId,
     cwd: chatThread?.folder ?? session.cwd ?? undefined,
@@ -5148,7 +5152,7 @@ function AgentChatBody({
                             type="button"
                             size="standard"
                             label="Design mode"
-                            onClick={enterDesignMode}
+                            onClick={activateDesignMode}
                             onMouseDown={event => event.preventDefault()}
                           >
                             <PenTool size={14} />

@@ -27,7 +27,8 @@ describe("composer Design mode entry", () => {
     const attachmentMenu = read("../composer-attachment-menu.tsx");
     expect(agentChat).toContain("composerDesignModeAvailable({");
     expect(agentChat).toContain('label="Design mode"');
-    expect(agentChat).toContain("onClick={enterDesignMode}");
+    expect(agentChat).toContain("composerFocusRef.current();");
+    expect(agentChat).toContain("onClick={activateDesignMode}");
     expect(agentChat).toContain("designModeAvailable ? enterDesignMode : undefined");
     expect(agentChat).toContain('designModeAvailable && chatThread?.composerMode !== "design" && (');
     expect(attachmentMenu).toContain("<span>Design</span>");
