@@ -82,9 +82,21 @@ describe("Absolute position in Position", () => {
   it("disables multi-selection arrangement when the layers have different parents", () => {
     const first = { ...layer("a", "absolute", "block") };
     const second = { ...layer("b", "absolute", "block") };
+    const third = { ...layer("c", "absolute", "block") };
     second.layout = { ...second.layout!, parentId: "other" };
-    render(first, [first, second]);
+    third.layout = { ...third.layout!, parentId: "other" };
+    render(first, [first, second, third]);
     expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(true);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Distribute horizontally"]')!.disabled).toBe(true);
+  });
+
+  it("ignores hidden layers when deciding whether arrangement is available", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    const hidden = { ...layer("hidden", "absolute", "block"), visible: false };
+    hidden.layout = { ...hidden.layout!, parentId: "other" };
+    render(first, [first, second, hidden]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(false);
   });
 
   it("is absent where the parent has no auto layout", () => {

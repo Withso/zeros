@@ -197,10 +197,15 @@ export function DesignPositionSection({
   const selection = layoutParents?.length ? layoutParents : [details];
   const placed = !frameSelected && selection.some(designLayoutPlacedByParent);
   const free = !frameSelected && !placed && selection.every((node) => node.layout?.parentId);
+  const arrangementSelection = selection.filter(
+    (node) => node.visible && node.layout?.parentId && !designLayoutPlacedByParent(node),
+  );
   const mixedParents =
-    selection.length > 1 &&
-    new Set(selection.map((node) => node.layout?.parentId)).size > 1;
-  const arrangementDisabled = disabled || mixedParents;
+    arrangementSelection.length > 1 &&
+    new Set(arrangementSelection.map((node) => node.layout?.parentId)).size > 1;
+  const arrangementDisabled =
+    disabled ||
+    (selection.length > 1 && (arrangementSelection.length < 2 || mixedParents));
   const absolute = frameSelected ? null : designLayoutAbsolutePosition(selection);
   const field = (label: string, property: string, extra: DesignLayoutFieldOptions = {}) =>
     renderField(label, property, designLayoutFieldValue(details, property), {
