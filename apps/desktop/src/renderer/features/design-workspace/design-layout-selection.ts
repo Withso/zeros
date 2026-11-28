@@ -36,13 +36,7 @@ export function designLayoutSelectionUpdates(
       node.layout?.parentId &&
       !designLayoutPlacedByParent(node),
   );
-  const parentId = selected[0]?.layout?.parentId;
-  if (
-    selected.length < 2 ||
-    !parentId ||
-    selected.some((node) => node.layout?.parentId !== parentId)
-  )
-    return updates;
+  if (selected.length < 2 || !selected[0]?.layout?.parentId) return updates;
   const axis = action.axis;
   const boxes = new Map(
     selected.map((node) => [node.oid, designLayoutChildBounds(node)]),

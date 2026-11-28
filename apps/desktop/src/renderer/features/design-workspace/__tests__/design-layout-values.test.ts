@@ -124,6 +124,27 @@ describe("designer layout values", () => {
     expect(updates.get("c")?.left).toBeUndefined();
   });
 
+  it("aligns free layers across different parents by selection bounds", () => {
+    const first = node({ width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, parentId: "parent-a", x: 10 };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, parentId: "parent-b", x: 100 };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.get("first")).toMatchObject({ left: "120px" });
+    expect(updates.get("second")).toBeUndefined();
+  });
+
   it("moves block-flow layers when a multi-selection is aligned", () => {
     const first = node({ position: "static", left: "auto", width: "40px" });
     first.oid = "first";
