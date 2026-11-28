@@ -573,8 +573,8 @@ export class DesignFramePreviews {
     }
     const replacing = this.demandToken === token && this.demand !== null &&
       sameOwner(this.demand.owner, demand.owner) && this.demand.theme === demand.theme;
-    const quiet = this.deps.quietMs?.() ?? 0;
-    if (replacing && quiet > 0) {
+    const quiet = replacing ? this.deps.quietMs?.() ?? 0 : 0;
+    if (quiet > 0) {
       if (!(this.deferredDemand?.token === token && sameDemand(this.deferredDemand.demand, demand))) {
         this.deferredDemand = { token, demand };
         this.scheduleDeferredDemand(quiet);
