@@ -80,4 +80,18 @@ describe("cloud Codex managed requirements", () => {
     expect(params("thread/start")).toMatchObject({ approvalPolicy: "never", sandbox: "danger-full-access" });
     expect(events.some(event => event.update.sessionUpdate === "current_mode_update")).toBe(false);
   });
+
+  it("never opens Plan as Full access when policy allows only Full access", async () => {
+    native.requirements = managed(["never"], null);
+    await expect(open("read-only")).rejects.toThrow(/does not allow the "read-only" permission mode/);
+    expect(params("thread/start")).toBeUndefined();
+  });
+
+  it("reports which modes managed policy blocks, so a queued prompt keeps the bounded mode", async () => {
+    native.requirements = managed(["on-request"], ["read-only", "workspace-write"]);
+    const { driver } = await open("full-access");
+    expect(driver.allowsMode("full-access")).toBe(false);
+    expect(driver.allowsMode("read-only")).toBe(true);
+  });
 });
+

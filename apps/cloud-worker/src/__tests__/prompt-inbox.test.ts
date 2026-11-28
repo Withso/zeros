@@ -543,6 +543,23 @@ it("preserves a frozen first-send Plan mode when selection changes during dispat
   } finally { begin.resolve({ dispatch: false, state: "cancelled" }); }
 });
 
+it("keeps the driver's bounded mode for a frozen mode managed Codex policy blocks, and refuses switching to it", async () => {
+  const relay = new PullRelay(), item = delivery(), driver = new FakeDriver();
+  Object.assign(item.payload, { permissionMode: "bypass" }); relay.enqueue({ prompts: [item], stops: [] });
+  Object.assign(driver, { allowsMode: (mode: string) => mode !== "full-access" });
+  const f = await setup({ relay, driver, interactions: true });
+  await until(() => driver.prompts.length).toBe(1);
+  // The prompt runs instead of failing, and Full access is never applied.
+  expect(driver.modes).not.toContain("full-access");
+  driver.complete();
+  const executionId = (await persisted(f.directory))[0].executionId;
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  const mode = browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", executionId, sessionId: executionId, modeId: "full-access" });
+  await relay.request(CLIENT_A, mode);
+  expect(relay.response(mode.id)).not.toMatchObject({ type: "AGENT_MODE_CHANGED" });
+  expect(JSON.stringify(relay.response(mode.id))).toContain("organization's Codex policy");
+});
+
 it("refuses an explicit persisted Plan prompt when interactions were not negotiated", async () => {
   const relay = new PullRelay(), item = delivery();
   Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });

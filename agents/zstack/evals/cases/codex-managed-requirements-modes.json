@@ -1,0 +1,9 @@
+{
+  "id": "codex-managed-requirements-modes",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:1366",
+  "symptom": "With an organization requirements.toml that allows only on-request approval, every Zeros Codex turn failed with 'invalid thread settings override … not in the allowed set' because Zeros sent fixed approval/sandbox values and never read configRequirements/read.",
+  "rule": "Read Codex managed requirements before thread/start; offer only allowed modes; fall back only to a stricter allowed mode (never silently drop the sandbox or approval prompt); refuse blocked explicit switches with the policy message, Local and cloud alike. See playbooks/bug-fix.md.",
+  "check": "pnpm exec vitest run --config vitest.config.ts packages/protocol/src/__tests__/codex-mode-policy.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-requirements.test.ts"
+}

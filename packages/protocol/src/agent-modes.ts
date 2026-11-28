@@ -109,6 +109,15 @@ export interface CodexPolicyRequirements {
  * write, so it is the nearest stricter stand-in for Ask First. */
 const CODEX_MODE_RESTRICTIVENESS: readonly CodexPermissionModeId[] = ["read-only", "ask", "auto-edit", "full-access"];
 
+/** Whether managed policy allows any of `offered`, so a refusal can say which
+ * modes the user may choose instead of claiming none are allowed. */
+export function codexAnyModeAllowed(
+  requirements: CodexPolicyRequirements | null | undefined,
+  offered: readonly CodexPermissionModeId[] = CODEX_MODE_RESTRICTIVENESS,
+): boolean {
+  return offered.some((id) => codexModeAllowed(id, requirements));
+}
+
 export function codexModeAllowed(modeId: CodexPermissionModeId, requirements: CodexPolicyRequirements | null | undefined): boolean {
   const { approvalPolicy, sandboxMode } = codexModePolicy(modeId);
   const approvals = requirements?.allowedApprovalPolicies;
@@ -117,8 +126,10 @@ export function codexModeAllowed(modeId: CodexPermissionModeId, requirements: Co
     (!Array.isArray(sandboxes) || sandboxes.includes(sandboxMode));
 }
 
-/** The exact mode when allowed, else the nearest allowed among `offered`,
- * more restrictive first; null when managed policy allows none of them. */
+/** The exact mode when allowed, else the nearest MORE restrictive allowed mode
+ * among `offered`. Never a less restrictive one: dropping the sandbox or the
+ * approval prompt needs the user's own choice. Null when policy allows neither
+ * the mode nor anything stricter. */
 export function resolveCodexMode(
   modeId: CodexPermissionModeId,
   requirements: CodexPolicyRequirements | null | undefined,
@@ -126,7 +137,7 @@ export function resolveCodexMode(
 ): CodexPermissionModeId | null {
   const ranked = CODEX_MODE_RESTRICTIVENESS.filter((id) => offered.includes(id));
   const at = ranked.indexOf(modeId);
-  const candidates = at < 0 ? ranked : [...ranked.slice(0, at + 1).reverse(), ...ranked.slice(at + 1)];
+  const candidates = at < 0 ? ranked : ranked.slice(0, at + 1).reverse();
   return candidates.find((id) => codexModeAllowed(id, requirements)) ?? null;
 }
 

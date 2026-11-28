@@ -1169,9 +1169,11 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
       { id: "auto-edit", name: "Auto-Edit" },
       { id: "read-only", name: "Read-Only" },
     ];
+    // Ask is blocked, so its stricter stand-in (read-only, shown as Plan)
+    // takes its place and stays reselectable after switching away.
     expect(
       permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, advertised),
-    ).toEqual([{ modeId: "auto-edit", label: "Approve for me" }]);
+    ).toEqual([{ modeId: "read-only", label: "Plan" }, { modeId: "auto-edit", label: "Approve for me" }]);
     expect(
       coerceModeIdForModel("codex", "gpt-5.6-sol", "full-access", null, undefined, advertised),
     ).toBe("auto-edit");

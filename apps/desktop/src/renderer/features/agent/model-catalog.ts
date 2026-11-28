@@ -782,6 +782,15 @@ export function permissionMenuItems(
   const advertised = advertisedModes?.length
     ? new Set(advertisedModes.map((mode) => mode.id))
     : null;
+  // Managed Codex policy that blocks Ask starts the chat in read-only (Plan),
+  // its stricter stand-in. Keep it selectable in Ask's place, or leaving it
+  // would be one-way: Codex has no other Plan control.
+  if (fam === "codex" && advertised && !advertised.has("ask") && advertised.has("read-only")) {
+    return order
+      .map((id) => (id === "ask" ? "read-only" : id))
+      .filter((id) => advertised.has(id))
+      .map((id) => ({ modeId: id, label: id === "read-only" ? "Plan" : labels[id] ?? id }));
+  }
   return order
     .filter(
       (id) =>
@@ -847,6 +856,14 @@ export function coerceModeIdForModel(
     const posture = permissionForAgentMode(modeId, agentId);
     const target = nativeModeIdForPosture(agentId, posture === "plan" ? "plan" : "danger");
     return items.find(item => item.modeId === target)?.modeId ?? modeId;
+  }
+  if (agentFamily(agentId) === "codex") {
+    // Same rule as the engine: the nearest offered mode that is no less
+    // restrictive than the one asked for.
+    const rank = ["read-only", "ask", "auto-edit", "full-access"];
+    const at = rank.indexOf(modeId);
+    const stricter = at < 0 ? undefined : rank.slice(0, at + 1).reverse().find((id) => items.some((i) => i.modeId === id));
+    if (stricter) return stricter;
   }
   return (items.find((i) => i.modeId === "accept-edits") ?? items[0]).modeId;
 }

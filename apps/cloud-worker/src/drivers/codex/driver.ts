@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import path, { dirname, join } from "node:path";
-import { codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements, codexQuestionFeatureArgs, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex, isCodexApprovalMethod,
+import { codexAnyModeAllowed, codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements, codexQuestionFeatureArgs, mapCodexUserInputToQuestion, mapNativeQuestionAnswerToCodex, isCodexApprovalMethod,
   mapCodexApprovalToPermission, mapCodexPermissionResponse, defaultCodexApprovalResponse, codexFileChangePaths,
   type ContentBlock, type PromptResponse, type SessionNotification, type QuestionResponse, type RequestPermissionResponse } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
@@ -123,7 +123,9 @@ export class CodexDriver implements Driver {
       this.policyRequirements = await this.readPolicyRequirements();
       const requestedMode = this.modeId;
       const startMode = resolveCodexMode(requestedMode, this.policyRequirements, ["read-only", "full-access"]);
-      if (startMode !== "read-only" && startMode !== "full-access") throw new Error(codexPolicyBlockedMessage(this.policyRequirements));
+      if (startMode !== "read-only" && startMode !== "full-access")
+        throw new Error(codexPolicyBlockedMessage(this.policyRequirements,
+          codexAnyModeAllowed(this.policyRequirements, ["read-only", "full-access"]) && (requestedMode === "read-only" || requestedMode === "full-access") ? requestedMode : undefined));
       this.modeId = startMode;
       const response = await this.rpc.request<{ thread: { id: string }; model?: string }>(input.nativeSessionId ? "thread/resume" : "thread/start", {
         ...(input.nativeSessionId ? { threadId: input.nativeSessionId, excludeTurns: true } : {}),
@@ -212,6 +214,12 @@ export class CodexDriver implements Driver {
     // turn/start owns model changes. A currently running turn keeps its model.
     if (this.model !== model) this.effort = undefined;
     this.model = model;
+  }
+
+  /** False only for a mode managed policy blocks, so callers can keep the
+   * already bounded mode instead of failing a queued prompt. */
+  allowsMode(modeId: string): boolean {
+    return (modeId !== "read-only" && modeId !== "full-access") || codexModeAllowed(modeId, this.policyRequirements);
   }
 
   async setMode(modeId: string): Promise<void> {

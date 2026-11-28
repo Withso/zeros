@@ -1,6 +1,6 @@
 import { mapCodexApprovalToPermission, mapCodexPermissionResponse,
   defaultCodexApprovalResponse as defaultMethodResponse, codexFileChangePaths as fileChangePaths } from "@zeros/protocol/agent-events";
-import { codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements } from "@zeros/protocol/agent-events";
+import { codexAnyModeAllowed, codexModeAllowed, codexModePolicy, codexPolicyBlockedMessage, resolveCodexMode, type CodexPolicyRequirements } from "@zeros/protocol/agent-events";
 import { mapCodexUserInputToQuestion as mapUserInputToQuestion, mapNativeQuestionAnswerToCodex } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
@@ -2041,6 +2041,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // The permission posture is session state, not part of the spawn env.
     // The new connection's managed policy still bounds it.
     rebooted.modeId = resolveCodexMode(modeId, rebooted.policyRequirements) ?? rebooted.modeId;
+    if (rebooted.modeId !== modeId) {
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        executionId: zerosSessionId,
+        sessionId: zerosSessionId,
+        update: { sessionUpdate: "current_mode_update", currentModeId: rebooted.modeId },
+      });
+    }
     rebooted.needsHistoryReplay = session.needsHistoryReplay || loaded.resumedFresh === true;
     if (loaded.providerBinding && rebooted.threadId !== threadId) {
       this.ctx.emit.onSessionUpdate(this.agentId, {
@@ -2275,12 +2282,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
         allowedApprovalPolicies: Array.isArray(requirements.allowedApprovalPolicies) ? requirements.allowedApprovalPolicies : null,
         allowedSandboxModes: Array.isArray(requirements.allowedSandboxModes) ? requirements.allowedSandboxModes : null,
       };
-    } catch (error) {
+    } catch {
+      // Closed diagnostic: provider error text never reaches logs.
       this.ctx.emit.onAgentStderr(
         this.agentId,
-        `[codex-app-server] Managed requirements unavailable; permission modes are unrestricted: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        "[codex-app-server] Managed requirements unavailable; permission modes are unrestricted.",
       );
       return null;
     }
@@ -2562,7 +2568,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
         kind: "protocol-error",
         stage: opts.kind === "resume" ? "loadSession" : "newSession",
         agentId: this.agentId,
-        message: codexPolicyBlockedMessage(policyRequirements),
+        // Looser modes may be allowed, but only the user can choose to drop
+        // the sandbox or the approval prompt.
+        message: codexPolicyBlockedMessage(policyRequirements, codexAnyModeAllowed(policyRequirements) ? initialMode : undefined),
       });
     }
     // Resume can emit the restored cumulative snapshot before its RPC returns.
