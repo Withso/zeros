@@ -3999,7 +3999,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                     frameStyleTarget || details.oid === layoutRootId
                   }
                   componentMainSelected={
-                    frameStyleTarget && frameComponentPresentation?.kind === "main"
+                    frameComponentPresentation?.kind === "main" &&
+                    (frameStyleTarget || details.oid === layoutRootId)
                   }
                   layoutParents={shownParents}
                   selectionCount={presentedNodeCount}

@@ -372,6 +372,12 @@ export function DesignAutoLayoutControls({
                 <Maximize2 />
                 Fixed
               </DropdownMenuRadioItem>
+              {!relativeAllowed && mode === "relative" && !modeMixed && (
+                <DropdownMenuRadioItem value="relative" disabled>
+                  <Percent />
+                  Relative
+                </DropdownMenuRadioItem>
+              )}
               {relativeAllowed && (
                 <DropdownMenuRadioItem value="relative">
                   <Percent />
