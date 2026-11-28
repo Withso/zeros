@@ -5142,7 +5142,7 @@ function AgentChatBody({
                         onDesign={designModeAvailable ? enterDesignMode : undefined}
                         designSelected={chatThread?.composerMode === "design"}
                       />
-                      {designModeAvailable && chatThread?.composerMode !== "design" && !editingQueuedId && (
+                      {designModeAvailable && chatThread?.composerMode !== "design" && (
                         <Tooltip label="Design mode">
                           <IconButton
                             type="button"
