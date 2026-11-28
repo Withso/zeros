@@ -2,6 +2,7 @@ import { BrowserWindow, Notification, type IpcMainInvokeEvent } from "electron";
 import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
 import { emitEvent, getMainWindow, openMainWindowForNavigation } from "../ipc/events";
 import { setCommand } from "../ipc/router";
+import { getSessionUserForMain, onMainAuthSessionChanged } from "../ipc/commands/auth-session";
 import { NotifyUserCenter, type NotifyUserTarget } from "./center";
 import { NOTIFY_USER_ATTENTION_EVENT, NOTIFY_USER_OPEN_EVENT, type NotifyUserChat } from "../../shared/notify-user";
 
@@ -34,6 +35,17 @@ export function installNotifyUser(): { receiveDevice(event: NotifyUserEvent): vo
     },
     open,
     attention: arrival => emitEvent(NOTIFY_USER_ATTENTION_EVENT, { workspaceId: arrival.workspaceId, chatId: arrival.chatId } satisfies NotifyUserChat),
+  });
+
+  // A notification names one account's chat; it must not stay clickable, or
+  // open that chat in the window, after another account signs in.
+  let account = getSessionUserForMain()?.accountId ?? null;
+  const stopSessionWatch = onMainAuthSessionChanged(() => {
+    const next = getSessionUserForMain()?.accountId ?? null;
+    if (next === account) return;
+    account = next;
+    for (const notification of shown.splice(0)) notification.close();
+    pendingOpen = null;
   });
 
   const requireMainFrame = (event: IpcMainInvokeEvent) => {
@@ -74,6 +86,6 @@ export function installNotifyUser(): { receiveDevice(event: NotifyUserEvent): vo
       center.receive("device", { notificationId: event.notificationId, workspaceId: event.workspace.id, chatId: event.chat.id,
         chatTitle: event.chat.title, title: event.title, ...(Number.isFinite(createdAt) ? { createdAt } : {}) });
     },
-    dispose: () => { for (const notification of shown.splice(0)) notification.close(); },
+    dispose: () => { stopSessionWatch(); for (const notification of shown.splice(0)) notification.close(); },
   };
 }

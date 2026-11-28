@@ -422,6 +422,12 @@ function removeRecordKey<T>(
   return next;
 }
 
+/** Edit stashes are keyed `${chatId}:${messageId}`; a cloud-scoped chat id
+ * has exactly four colon-separated parts because its native id is encoded. */
+export function editDraftChatId(key: string): string {
+  return key.startsWith("cloud:") ? key.split(":").slice(0, 4).join(":") : key.slice(0, key.indexOf(":"));
+}
+
 function removeRecordKeysMatching<T>(
   record: Record<string, T>,
   matches: (key: string) => boolean,
@@ -492,6 +498,12 @@ function initialPendingWorkspaceValidation(): string | null {
   const project = findProjectForFolder(folder, loadProjects());
   if (!project || folderIsWithinRoot(folder, project.repoRoot)) return null;
   return folder;
+}
+
+/** Bounded so a long session never grows it without limit. */
+function retireDraftChats(state: WorkspaceState, chatIds: readonly string[]): readonly string[] | undefined {
+  if (!chatIds.length) return state.retiredDraftChatIds;
+  return [...new Set([...(state.retiredDraftChatIds ?? []), ...chatIds])].slice(-500);
 }
 
 const initialState: WorkspaceState = {
@@ -1280,6 +1292,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const folders = action.folders.filter(isCloudWorkspace);
       if (!folders.length) return state;
       const removed = (folder: string) => folders.some(root => folderIsWithinRoot(folder, root));
+      // Unsent drafts belong to the chats being removed, as DELETE_CHAT drops them.
+      const removedChat = (chatId: string) => {
+        const scope = parseCloudScopedId(chatId);
+        return !!scope && removed(cloudWorkspaceKey(scope));
+      };
       const activeRemoved = removed(selectActiveFolder(state) ?? "");
       let next = state;
       for (const folder of folders) {
@@ -1287,7 +1304,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       }
       return {
         ...next,
+        retiredDraftChatIds: retireDraftChats(state, [
+          ...state.chats.filter(chat => removed(chat.folder)).map(chat => chat.id),
+          ...Object.keys(state.chatComposerDrafts).filter(removedChat),
+        ]),
         chats: next.chats.filter(chat => !removed(chat.folder)),
+        chatComposerDrafts: removeRecordKeysMatching(next.chatComposerDrafts, removedChat),
+        editComposerDrafts: removeRecordKeysMatching(next.editComposerDrafts, key => removedChat(editDraftChatId(key))),
         pendingChatHydrationFolder: next.pendingChatHydrationFolder && removed(next.pendingChatHydrationFolder) ? null : next.pendingChatHydrationFolder,
         lastWorkspaceByRepoRoot: removeRecordKeysMatching(next.lastWorkspaceByRepoRoot, removed),
         ...(activeRemoved ? {
@@ -1458,6 +1481,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       }
       return {
         ...state,
+        retiredDraftChatIds: retireDraftChats(state, [action.id]),
         chats: next,
         activeChatId: nextActiveId,
         // No replacement in that workspace: keep the chrome on it, as ARCHIVE_CHAT does.
@@ -1641,6 +1665,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ),
       };
     case "SET_CHAT_DRAFT":
+      if (state.retiredDraftChatIds?.includes(action.chatId)) return state;
       return {
         ...state,
         chatComposerDrafts: {
@@ -1655,6 +1680,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       return { ...state, chatComposerDrafts: next };
     }
     case "SET_EDIT_DRAFT": {
+      if (state.retiredDraftChatIds?.includes(action.chatId)) return state;
       const key = `${action.chatId}:${action.messageId}`;
       return {
         ...state,
