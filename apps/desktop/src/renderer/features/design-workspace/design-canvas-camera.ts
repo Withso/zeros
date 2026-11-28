@@ -127,7 +127,7 @@ function paintChromeScale(element: HTMLElement, zoom: number, gesture = false): 
 
 /** Chrome owned by one camera paint: the focused and hovered frames resolve
  * once for the whole world instead of per frame. */
-interface ChromePaintContext { focusedFrame: Element | null; hoveredFrame: Element | null; gesture?: boolean }
+interface ChromePaintContext { focusedFrame: Element | null; hoveredFrame: Element | null; gesture?: boolean; childCount?: number }
 const hoveredFrames = new WeakMap<HTMLDivElement, HTMLElement | null>();
 
 function frameOf(world: HTMLDivElement, node: EventTarget | null): HTMLElement | null {
@@ -152,6 +152,30 @@ export function designCanvasPointerFrame(world: HTMLDivElement): HTMLElement | n
   return canvasPointers.get(world)?.intentFrame ?? chromePaintContext(world).hoveredFrame as HTMLElement | null;
 }
 
+type PaintedFrameVisibility = {
+  zoom: number; width: number; height: number;
+  style: string | null; bounds: DesignCanvasFrameBounds | null; controls: string | null; childCount: number; frameChildCount: number;
+  pointer: boolean; tiled: boolean; chromeProtected: boolean; nestTarget: boolean;
+  focused: boolean; hovered: boolean; gesture: boolean;
+  compactControls: boolean | undefined; compactPlay: boolean | undefined; outside: boolean; sourceOutside: boolean;
+  scaleZoom: number; rootsZoom: number | null; rootsGesture: boolean;
+};
+const paintedFrameVisibility = new WeakMap<HTMLElement, PaintedFrameVisibility>();
+function paintedPanVisibilityUnchanged(painted: PaintedFrameVisibility, bounds: DesignCanvasFrameBounds,
+  viewport: DesignViewport, width: number, height: number, pointer: boolean, focused: boolean,
+  hovered: boolean, gesture: boolean, chromeProtected: boolean, nestTarget: boolean): boolean {
+  if (painted.zoom !== viewport.zoom || painted.width !== width || painted.height !== height ||
+    painted.pointer !== pointer || painted.focused !== focused || painted.hovered !== hovered ||
+    painted.gesture !== gesture) return false;
+  const left = bounds.x * viewport.zoom + viewport.panX, top = bounds.y * viewport.zoom + viewport.panY;
+  const scaledWidth = bounds.width * viewport.zoom, scaledHeight = bounds.height * viewport.zoom;
+  const sourceOutside = left + scaledWidth < 0 || top + scaledHeight < 0 || left > width || top > height;
+  const outside = chromeProtected || nestTarget || focused ? false :
+    left + scaledWidth < -CHROME_OVERSCAN_PIXELS || top + scaledHeight < -CHROME_OVERSCAN_PIXELS ||
+    left > width + CHROME_OVERSCAN_PIXELS || top > height + CHROME_OVERSCAN_PIXELS;
+  return painted.outside === outside && painted.sourceOutside === sourceOutside;
+}
+
 export function paintDesignFrameVisibility(element: HTMLElement, context?: ChromePaintContext): void {
   const world = element.parentElement;
   if (!(world instanceof HTMLDivElement)) return;
@@ -163,7 +187,33 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
   }
   const size = viewportSizes.get(world);
   const focusedFrame = context ? context.focusedFrame : frameOf(world, world.ownerDocument.activeElement);
-  const bounds = readDesignCanvasFrameBounds(element);
+  const worldChildCount = context?.childCount ?? world.childElementCount;
+  const style = element.getAttribute("style");
+  const painted = paintedFrameVisibility.get(element);
+  const frameChildCount = element.childElementCount;
+  const structureDirty = painted?.frameChildCount !== frameChildCount;
+  const styleDirty = !painted || painted.style !== style;
+  const staticInputs = painted && painted.style === style &&
+    painted.childCount === worldChildCount && painted.frameChildCount === frameChildCount;
+  const bounds = staticInputs ? painted.bounds : readDesignCanvasFrameBounds(element);
+  const controls = element.getAttribute("data-design-frame-controls");
+  const pointer = element.hasAttribute("data-design-frame-pointer");
+  const tiled = element.hasAttribute("data-design-frame-tiled");
+  const chromeProtected = element.hasAttribute("data-design-frame-chrome-protected");
+  const nestTarget = element.hasAttribute("data-design-nest-target");
+  const focused = focusedFrame === element;
+  const hovered = context ? context.hoveredFrame === element : element.matches(":hover");
+  const gestureInput = !chromeProtected && !!(context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
+  if (staticInputs && painted && painted.controls === controls && painted.tiled === tiled &&
+    painted.chromeProtected === chromeProtected && painted.nestTarget === nestTarget &&
+    bounds && bounds.width >= 0 && bounds.height >= 0 && size &&
+    paintedPanVisibilityUnchanged(painted, bounds, viewport, size.width, size.height,
+      pointer, focused, hovered, gestureInput, chromeProtected, nestTarget)) {
+    // Child replacement is not synchronously observable; let the root cache
+    // validate parentage without rewriting unchanged chrome.
+    paintFrameChromeRoots(element, painted.rootsZoom, painted.rootsGesture);
+    return;
+  }
   let outside = false, sourceOutside = false;
   if (size && size.width > 0 && size.height > 0) {
     // Inline geometry is also the authoritative in-progress resize/move.
@@ -172,8 +222,7 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
       const left = bounds.x * viewport.zoom + viewport.panX, top = bounds.y * viewport.zoom + viewport.panY;
       const width = bounds.width * viewport.zoom, height = bounds.height * viewport.zoom;
       sourceOutside = left + width < 0 || top + height < 0 || left > size.width || top > size.height;
-      if (!element.hasAttribute("data-design-frame-chrome-protected") &&
-          !element.hasAttribute("data-design-nest-target") && focusedFrame !== element)
+      if (!chromeProtected && !nestTarget && !focused)
         outside = left + width < -CHROME_OVERSCAN_PIXELS || top + height < -CHROME_OVERSCAN_PIXELS ||
           left > size.width + CHROME_OVERSCAN_PIXELS || top > size.height + CHROME_OVERSCAN_PIXELS;
     }
@@ -184,32 +233,66 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
   // Distant automatic controls stay compact until the same paint admits
   // their nearby chrome. Expanding all retained roots at a zoom threshold
   // makes layout/paint cost depend on document size instead of the viewport.
-  const controls = element.getAttribute("data-design-frame-controls");
+  let compactControlsOutput: boolean | undefined;
+  let compactPlayOutput: boolean | undefined;
   if (controls) {
     const automatic = controls === "automatic" && !!bounds;
     const width = bounds ? bounds.width * viewport.zoom : 0;
-    const hidden = automatic && (outside ||
-      width < (world.childElementCount > FRAME_NAME_BUDGET ? CROWDED_FRAME_NAME_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
-    element.toggleAttribute("data-design-frame-compact-controls", hidden);
+    compactControlsOutput = automatic && (outside ||
+      width < (worldChildCount > FRAME_NAME_BUDGET ? CROWDED_FRAME_NAME_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
     // Between the two widths the name stays and only Play waits for intent.
-    element.toggleAttribute("data-design-frame-compact-play", automatic && !hidden && width < FRAME_PLAY_MIN_PIXELS);
+    compactPlayOutput = automatic && !compactControlsOutput && width < FRAME_PLAY_MIN_PIXELS;
   }
-  element.toggleAttribute("data-design-frame-chrome-outside", outside);
-  // Ready source paint follows the camera in this write, including a return
-  // before React runs. Cold documents still lay out and caches stay mounted.
-  element.toggleAttribute("data-design-frame-source-outside", sourceOutside);
-  const intent = element.hasAttribute("data-design-frame-pointer") || focusedFrame === element ||
-    (context ? context.hoveredFrame === element : element.matches(":hover"));
-  const compactControls = element.hasAttribute("data-design-frame-compact-controls") && !intent;
-  const chromeProtected = element.hasAttribute("data-design-frame-chrome-protected");
-  const compact = element.hasAttribute("data-design-frame-tiled") && compactControls && !chromeProtected &&
-    !element.hasAttribute("data-design-nest-target");
+  const intent = pointer || focused || hovered;
+  const compactControls = (compactControlsOutput ?? element.hasAttribute("data-design-frame-compact-controls")) && !intent;
+  const compact = tiled && compactControls && !chromeProtected && !nestTarget;
   // A protected frame is one or a few frames whose selection geometry and
   // size label must not drift either; its subtree is cheap to restyle.
-  const gesture = !chromeProtected && !!(context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
-  paintChromeScale(element, outside || compact ? 1 : viewport.zoom, gesture);
-  paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom,
-    gesture && controls === "automatic" && focusedFrame !== element);
+  const scaleZoom = outside || compact ? 1 : viewport.zoom;
+  const rootsZoom = outside || compactControls ? null : viewport.zoom;
+  const rootsGesture = gestureInput && controls === "automatic" && !focused;
+  // Most frames keep the same output through a pan: distant frames remain
+  // outside/compact and visible frames keep one constant scale while only the
+  // world transform moves. Do not allocate or touch their DOM state again.
+  if (staticInputs && !structureDirty && painted && painted.outside === outside && painted.sourceOutside === sourceOutside &&
+    painted.compactControls === compactControlsOutput && painted.compactPlay === compactPlayOutput &&
+    painted.scaleZoom === scaleZoom && painted.gesture === gestureInput &&
+    painted.rootsZoom === rootsZoom && painted.rootsGesture === rootsGesture) {
+    // Outputs can survive a zoom or resize unchanged. Adopt the current
+    // inputs or those frames would miss the pan fast path forever.
+    painted.zoom = viewport.zoom; painted.width = size?.width ?? 0; painted.height = size?.height ?? 0;
+    painted.style = style; painted.bounds = bounds; painted.controls = controls;
+    painted.childCount = worldChildCount; painted.frameChildCount = frameChildCount;
+    painted.pointer = pointer; painted.tiled = tiled; painted.chromeProtected = chromeProtected;
+    painted.nestTarget = nestTarget; painted.focused = focused; painted.hovered = hovered; painted.gesture = gestureInput;
+    // Child replacement is not synchronously observable here either.
+    paintFrameChromeRoots(element, painted.rootsZoom, painted.rootsGesture);
+    return;
+  }
+  const next: PaintedFrameVisibility = { zoom: viewport.zoom,
+    width: size?.width ?? 0, height: size?.height ?? 0, style, bounds, controls,
+    childCount: worldChildCount, frameChildCount, pointer, tiled,
+    chromeProtected, nestTarget, focused, hovered, gesture: gestureInput,
+    compactControls: compactControlsOutput, compactPlay: compactPlayOutput,
+    outside, sourceOutside, scaleZoom, rootsZoom, rootsGesture };
+  if (controls) {
+    if (!painted || painted.compactControls !== compactControlsOutput)
+      element.toggleAttribute("data-design-frame-compact-controls", compactControlsOutput);
+    if (!painted || painted.compactPlay !== compactPlayOutput)
+      element.toggleAttribute("data-design-frame-compact-play", compactPlayOutput);
+  }
+  if (!painted || painted.outside !== outside) element.toggleAttribute("data-design-frame-chrome-outside", outside);
+  // Ready source paint follows the camera in this write, including a return
+  // before React runs. Cold documents still lay out and caches stay mounted.
+  if (!painted || painted.sourceOutside !== sourceOutside) element.toggleAttribute("data-design-frame-source-outside", sourceOutside);
+  if (!painted || styleDirty || painted.scaleZoom !== scaleZoom || painted.gesture !== gestureInput)
+    paintChromeScale(element, scaleZoom, gestureInput);
+  if (!painted || structureDirty || painted.rootsZoom !== rootsZoom || painted.rootsGesture !== rootsGesture)
+    paintFrameChromeRoots(element, rootsZoom, rootsGesture);
+  // paintChromeScale writes camera variables onto this same inline style.
+  // Cache the post-paint text so unchanged frames do not look mutated forever.
+  next.style = element.getAttribute("style");
+  paintedFrameVisibility.set(element, next);
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
 
@@ -219,7 +302,7 @@ function paintCanvasChrome(world: HTMLDivElement, gesture = world.hasAttribute("
   paintingWorlds.add(world);
   try {
     canvasPointers.get(world)?.update(paintedViews.get(world));
-    const context = { ...chromePaintContext(world), gesture };
+    const context = { ...chromePaintContext(world), gesture, childCount: world.childElementCount };
     for (const element of world.children) {
       if (element instanceof HTMLElement) paintDesignFrameVisibility(element, context);
     }

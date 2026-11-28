@@ -59,4 +59,49 @@ describe("a sidebar workspace row's click", () => {
     );
     expect(row).toMatch(/onClick=\{\(event\) => \{\s*if \(!eventInsideOwnDom\(event\)\) return;/);
   });
+
+  // Moving over or focusing the logo menu's items reached the row through the
+  // portal and scheduled its hover card, which then opened after the menu had
+  // closed, over whatever the pointer went to next.
+  it("does not schedule the hover card from a portalled menu", () => {
+    const row = readFileSync(
+      resolve(process.cwd(), "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx"),
+      "utf8",
+    );
+    for (const handler of ["onPointerEnter", "onFocus"]) {
+      expect(row, handler).toMatch(
+        new RegExp(`${handler}=\\{\\(event\\) => \\{\\s*if \\(!surfaceActive \\|\\| !eventInsideOwnDom\\(event\\)\\) return;`),
+      );
+    }
+  });
+});
+
+describe("a sidebar workspace row's hover intent", () => {
+  // React carries pointer entry and focus from a portalled menu to the row;
+  // the guard keeps them from scheduling the row's hover card.
+  it("ignores pointer entry and focus from a portalled menu", () => {
+    const schedule = vi.fn();
+    const guarded = (event: { currentTarget: Element; target: EventTarget | null }) => {
+      if (!eventInsideOwnDom(event)) return;
+      schedule();
+    };
+    act(() => root.render(createElement(
+      "div",
+      { "data-row": "", onPointerEnter: guarded, onFocus: guarded },
+      createElement("button", { type: "button", "data-open": "" }, "Open"),
+      createPortal(createElement("button", { type: "button", "data-menu-item": "" }, "Repository Settings"), portal),
+    )));
+    const item = portal.querySelector<HTMLButtonElement>("[data-menu-item]")!;
+    act(() => {
+      item.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      item.focus();
+    });
+    expect(schedule).not.toHaveBeenCalled();
+    const open = host.querySelector<HTMLButtonElement>("[data-open]")!;
+    act(() => {
+      open.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      open.focus();
+    });
+    expect(schedule).toHaveBeenCalledTimes(2);
+  });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { Cloud, CloudOff } from "lucide-react";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import {
@@ -42,6 +42,28 @@ export function useCloudWorkspaceStatus(folder: string | null): string | null {
     return (target ? cloudWorkspaceDocument(target)?.status : null) ?? null;
   }, [folder]);
   return useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+}
+
+const CLOUD_ERROR_STATUSES = new Set(["error", "failed", "setup_failed", "unhealthy"]);
+const NO_IDS: ReadonlySet<string> = new Set();
+
+/** Whether a cloud workspace's machine reports an error (Local rows never do). */
+export function cloudWorkspaceIsError(path: string): boolean {
+  const target = parseCloudWorkspaceKey(path);
+  const status = target ? cloudWorkspaceDocument(target)?.status : null;
+  return !!status && CLOUD_ERROR_STATUSES.has(status);
+}
+
+/** Ids of the listed cloud workspaces whose machine reports an error, read as
+ *  one string so the list re-renders only when that set changes. */
+export function useCloudErrorWorkspaceIds(workspaces: readonly { id: string; path: string }[]): ReadonlySet<string> {
+  const read = useCallback(() => {
+    let out = "";
+    for (const workspace of workspaces) if (cloudWorkspaceIsError(workspace.path)) out += `${workspace.id}\u0001`;
+    return out;
+  }, [workspaces]);
+  const key = useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+  return useMemo(() => (key ? new Set(key.split("\u0001").filter(Boolean)) : NO_IDS), [key]);
 }
 
 /** One 16px trailing mark for a cloud workspace row; Local rows carry none. */

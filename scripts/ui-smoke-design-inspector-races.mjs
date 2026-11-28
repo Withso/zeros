@@ -2,6 +2,10 @@ import { expect } from "@playwright/test";
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignInspectorRacesSmoke({ page, check }) {
+  const openTypeSettings = async () => {
+    const trigger = page.getByRole("button", { name: "Type settings", exact: true });
+    if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
+  };
   const origin = new URL(page.url()).origin;
   await page.goto(
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
@@ -50,7 +54,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
   await page.keyboard.press("v");
   await expect(page.getByRole("button", { name: "Select", exact: true })).toHaveAttribute("aria-pressed", "true");
   check("canvas tool shortcuts work after an inspector field commits", true);
-  await page.getByRole("button", { name: "Type settings", exact: true }).click();
+  await openTypeSettings();
   await field.getByLabel("Unit for Word gap").click();
   // The menu converts the value: 12px is 0.75rem at the 16px root.
   await page.getByRole("option", { name: "rem", exact: true }).click();
@@ -96,7 +100,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     )
     .toBe(3);
   await expect.poll(spacing).toBe("");
-  await page.getByRole("button", { name: "Type settings", exact: true }).click();
+  await openTypeSettings();
   await expect(input).toHaveValue("0");
   check(
     "numeric saves settle once per intent without restoring an older unit or value",
@@ -164,7 +168,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
           ),
         )
         .toBe(1);
-      await page.getByRole("button", { name: "Type settings", exact: true }).click();
+      await openTypeSettings();
       await field.getByLabel("Unit for Word gap").click();
       // The menu converts the value: 12px is 0.75rem at the 16px root.
       await page.getByRole("option", { name: "rem", exact: true }).click();

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { Archive, Cloud, FolderOpen, GitCommitVertical, Laptop } from "lucide-react";
+import { Cloud, FolderOpen, GitCommitVertical, Laptop } from "lucide-react";
+import { ArchiveIcon } from "../shared/ui/archive-icon";
 import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { PrPill } from "./pr/pr-pill";
 import { usePrIslandKind } from "./pr/pr-island-state-store";
@@ -120,7 +121,7 @@ export function SidebarWorkspaceHoverCard({
       <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
         {action === "archive" ? (
           <Button onClick={onArchive} className="bg-violet-bg text-violet-on-bg hover:bg-violet-bg border-transparent">
-            <Archive />Archive
+            <ArchiveIcon />Archive
           </Button>
         ) : cloud || folder || !github || action === "recover" ? (
           <Button onClick={onSelect}><FolderOpen />{action === "recover" ? "Recover workspace" : "Open workspace"}</Button>

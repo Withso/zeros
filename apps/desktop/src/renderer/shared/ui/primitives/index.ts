@@ -46,6 +46,7 @@ export {
   PopoverTrigger,
   PopoverContent,
   PopoverAnchor,
+  usePopoverOpenControl,
 } from "./popover";
 export {
   DropdownMenu,

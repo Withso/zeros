@@ -2,8 +2,8 @@ import { cn } from "../../shared/ui/cn";
 
 /** An agent finished while nobody was looking (chat-unread.ts). The dot fills
  *  the slot its surface gives it (a chat tab's agent logo, a workspace row's
- *  mark) in the accent. Decorative: tabs and rows name the state in their own
- *  accessible label. */
+ *  mark) in violet, Done's colour. Decorative: tabs and rows name the state in
+ *  their own accessible label. */
 export function ChatUnreadDot({ className }: { className?: string }) {
   return (
     <span
@@ -14,7 +14,7 @@ export function ChatUnreadDot({ className }: { className?: string }) {
       aria-hidden="true"
       data-chat-unread=""
     >
-      <span className="bg-accent size-1.5 rounded-full" />
+      <span className="bg-violet-text size-1.5 rounded-full" />
     </span>
   );
 }

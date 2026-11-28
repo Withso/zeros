@@ -5,6 +5,7 @@ vi.mock("../state/design-selection", () => ({
   selectDesignFrame: selectFrame,
 }));
 import { restoreDesignPageHistorySelection } from "../state/design-page-history";
+import { updateDesignAgentPageFollow, type DesignAgentPageFollowMemory } from "../state/design-agent-page-follow";
 import {
   bindDesignWorkspacePages,
   captureDesignPageOwner,
@@ -61,6 +62,25 @@ describe("Design history page ownership", () => {
     expect(designWorkspaceView("workspace").activePageId).toBe("b");
     expect(selectFrame).toHaveBeenCalledWith("workspace", null, expect.objectContaining({ owner: expect.objectContaining({ pageId: "b" }) }));
     expect(onItem).toHaveBeenCalledExactlyOnceWith(expected, expect.objectContaining({ id: "b" }));
+  });
+  it("marks undo page navigation as user navigation so an agent-created page does not follow", async () => {
+    const input = (overrides: Partial<Parameters<typeof updateDesignAgentPageFollow>[1]> = {}) => ({
+      active: true,
+      turnActive: false,
+      directoryId: "directory",
+      activePageId: designWorkspaceView("workspace").activePageId,
+      pages,
+      navigationEvent: designWorkspaceView("workspace").pageNavigationEvent ?? 0,
+      ...overrides,
+    });
+    let memory: DesignAgentPageFollowMemory | null = null;
+    memory = updateDesignAgentPageFollow(memory, input()).memory;
+    memory = updateDesignAgentPageFollow(memory, input({ turnActive: true })).memory;
+    await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"), reply, "undo");
+    expect(designWorkspaceView("workspace").activePageId).toBe("b");
+    memory = updateDesignAgentPageFollow(memory, input({ turnActive: true })).memory;
+    const agentPage = { id: "agent", title: "Agent", folder: "agent", frameFiles: [] };
+    expect(updateDesignAgentPageFollow(memory, input({ turnActive: true, pages: [...pages, agentPage] })).switchToPageId).toBeUndefined();
   });
   it("does not restore an item after the user leaves during the frame-selection write", async () => {
     let finish!: () => void;

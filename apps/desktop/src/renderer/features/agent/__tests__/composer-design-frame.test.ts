@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -74,6 +75,19 @@ describe("parked composer frame ownership", () => {
     expect(mocks.useWorkspaces).toHaveBeenCalledWith(null);
   });
 
+  it("captures a pinned frame with the composer's current intent", () => {
+    const context = readContext({ ...options, initialFrame: target, intent: "design" });
+    expect(context.capture()).toMatchObject({ frame: "phone.html", intent: "design" });
+  });
+
+  it("clears a sent pinned frame after its intent follows a mode switch", () => {
+    const context = readContext({ ...options, active: true, initialFrame: target, intent: "design" });
+    const submitted = context.capture();
+    expect(submitted).toMatchObject({ intent: "design" });
+    context.consume(submitted);
+    expect(context.capture()).toBeNull();
+  });
+
   it.each([
     { workspaces: undefined },
     { workspaces: [] },
@@ -110,12 +124,32 @@ describe("parked composer frame ownership", () => {
     expect(mocks.peekWorkspaces).not.toHaveBeenCalled();
   });
 
+  it("does not attach or expose a canvas selection before explicit attach", () => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.bindDirectory("workspace", "design_directory");
+    store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
+    const context = readContext({ ...options, active: true });
+    expect(context.selection).toBeNull();
+    expect(context.capture()).toBeNull();
+    expect(context.hasContext).toBe(false);
+  });
+
+  it("exposes one explicit composer control and shortcut", () => {
+    const source = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
+    expect(source).toContain('label="Attach selected frame"');
+    expect(source).toContain('aria-keyshortcuts="Meta+Shift+F Control+Shift+F"');
+    expect(source).toContain('shortcut="⌘⇧F"');
+    expect(source).toContain('composerDockRef.current?.contains(event.target)');
+    expect(source).toContain('data-design-workspace-id');
+    expect(source).toContain('editingQueuedId');
+  });
+
   it("captures all current targets and keeps the submitted group frozen", () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.bindDirectory("workspace", "design_directory");
     store.setSelection("workspace", "phone.html", "parent", ["parent", "child"]);
     const context = readContext({ ...options, active: true });
-    const submitted = context.capture();
+    const submitted = context.attach();
     expect(submitted).toEqual([expect.objectContaining({ frame: "phone.html", nodeId: "parent" }), expect.objectContaining({ frame: "phone.html", nodeId: "child" })]);
     context.pin(submitted);
     store.setSelection("workspace", "tablet.html", null, [], { frameSelected: true });
@@ -128,13 +162,14 @@ describe("parked composer frame ownership", () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.bindDirectory("workspace", "design_directory");
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
-    const captured = readContext({ ...options, active: true }).capture();
+    const captured = readContext({ ...options, active: true }).attach();
     const context = readContext({ ...options, active: true, initialFrame: captured });
     context.remove();
     expect(context.capture()).toBeNull();
     expect(designWorkspaceView("workspace").selectedTargets).toEqual([]);
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
-    expect(context.capture()).toMatchObject({ frame: "phone.html" });
+    expect(context.capture()).toBeNull();
+    expect(context.attach()).toMatchObject({ frame: "phone.html" });
   });
 
   it("rejects a deleted target at send instead of attaching another frame", () => {
@@ -143,7 +178,7 @@ describe("parked composer frame ownership", () => {
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     const context = readContext({ ...options, active: true });
     mocks.snapshot = { directoryId: "design_directory", frames: [] };
-    expect(() => context.capture()).toThrow(/removed/);
+    expect(() => context.attach()).toThrow(/removed/);
   });
 
   it("does not reattach another live selection after sending a dismissed draft", () => {
@@ -168,7 +203,7 @@ describe("parked composer frame ownership", () => {
     store.bindDirectory(workspace.id, "design_directory");
     store.setSelection(workspace.id, "phone.html", "parent", ["parent", "child"]);
     const args = { ...options, cwd: workspace.path, active: true };
-    const captured = readContext(args).capture();
+    const captured = readContext(args).attach();
     const draft = JSON.parse(JSON.stringify({ designFrame: captured }));
     const restored = readContext({ ...args, active: false, initialFrame: draft.designFrame });
     expect(restored.capture()).toEqual(draft.designFrame);
@@ -182,7 +217,7 @@ describe("parked composer frame ownership", () => {
     store.bindDirectory("workspace", "design_directory");
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     const context = readContext({ ...options, active: true });
-    const submitted = context.capture();
+    const submitted = context.attach();
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     context.consume(submitted);
     expect(designWorkspaceView("workspace").selectedTargets).toEqual([{ frame: "phone.html" }]);
@@ -206,7 +241,7 @@ describe("parked composer frame ownership", () => {
     store.setSelection("workspace", "phone.html", null, [], { frameSelected: true });
     let saved: DesignFrameAttachmentSelection | null | undefined;
     const context = readContext({ ...options, active: true, onPin: value => { saved = value; } });
-    context.pin(context.capture());
+    context.attach();
     const draft = JSON.parse(JSON.stringify(saved));
     const restoredView = normalizeDesignWorkspaceView(JSON.parse(JSON.stringify(designWorkspaceView("workspace"))));
     useDesignWorkspaceUiStore.setState({ byWorkspace: { workspace: restoredView } });

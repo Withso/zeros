@@ -246,6 +246,7 @@ describe("design workspace interaction wiring", () => {
     expect(readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-inspector-kit.tsx"), "utf8"))
       .toContain("event.metaKey || event.ctrlKey || event.altKey || event.shiftKey");
     expect(source).toContain("keyboardSegmentFocus && !event.shiftKey");
+    expect(source).toContain("!viewport.contains(document.activeElement) && !keyboardTreeFocus");
     expect(source).toContain("const escapeShortcut = event.key === \"Escape\";");
     expect(source).toContain("confirmed.sourceVersion !== queued.sourceVersion");
     expect(source).toContain("if (selectedFrame.sourceVersion !== queued.sourceVersion) return;");
@@ -712,6 +713,13 @@ describe("design workspace interaction wiring", () => {
       `--design-spacing-line-border: ${DESIGN_WHITE}`,
     );
     expect(semanticTokensSource).toContain("--design-selection-handle-fill:");
+    const radiusHandle = /\.zd-design-radius-handle \{([^}]*)\}/.exec(uiSource)?.[1] ?? "";
+    expect(radiusHandle).toContain("background: var(--design-selection-handle-fill)");
+    expect(radiusHandle).not.toContain("var(--bg1)");
+    const componentSelection = /\[data-design-frame-component\]\[data-design-frame-root-selected\] \{([^}]*)\}/
+      .exec(uiSource)?.[1] ?? "";
+    expect(componentSelection).toContain("--design-selection-stroke:");
+    expect(componentSelection).not.toContain("--design-selection-handle-fill:");
     expect(uiSource).toContain(".zd-design-selection-outline");
     expect(uiSource).toContain(".zd-design-selection-handle");
     expect(uiSource).toContain("var(--design-padding-stroke)");

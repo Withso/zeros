@@ -27,6 +27,7 @@ import {
   type PrMarkTone,
   type SidebarPullRequest,
 } from "./sidebar-view-model";
+import "./sidebar-workspace-status.css";
 
 const PR_TONE_CLS: Record<PrMarkTone, string> = {
   draft: "text-fg3",
@@ -43,49 +44,81 @@ const PR_TONE_LABEL: Record<PrMarkTone, string> = {
   closed: "Closed",
 };
 
-export type SidebarRowStatusTone = "attention" | "done" | "failed" | "muted";
+export type SidebarRowStatusTone = "attention" | "done" | "failed" | "working" | "muted";
 export interface SidebarRowStatus { label: string; tone: SidebarRowStatusTone }
 
 // Status text sits on the sidebar surface, so it is each family's -text role
-// (the -on-bg roles are for text on a tinted -bg container). Done is violet,
-// the lifecycle's Done everywhere (StatusIcon, the workspace menu).
-const STATUS_TONE_CLS: Record<SidebarRowStatusTone, string> = {
-  attention: "text-yellow-text",
+// (the -on-bg roles are for text on a tinted -bg container). Waiting on the
+// user is orange, softer than a warning; Done is violet, the lifecycle's Done
+// everywhere. Working shimmers instead of taking a colour.
+export const STATUS_TONE_CLS: Record<SidebarRowStatusTone, string> = {
+  attention: "text-orange-text",
   done: "text-violet-text",
   failed: "text-red-text",
+  working: "zeros-working-shimmer",
   muted: "text-fg3",
 };
-/** Compact rows' dots take the same colours as the words they stand for. */
-export const STATUS_DOT_CLS: Record<Exclude<SidebarRowStatusTone, "muted">, string> = {
-  attention: "bg-yellow-text",
+/** The status dots take the same colours as the words they stand for. */
+export const STATUS_DOT_CLS: Record<Exclude<SidebarRowStatusTone, "muted" | "working">, string> = {
+  attention: "bg-orange-text",
   done: "bg-violet-text",
   failed: "bg-red-text",
 };
 
-export type SidebarRowLead = "archiving" | "working" | "child" | "folder" | "design" | "logo";
+/** The dot a status draws, or null for a status that has none. */
+export function sidebarStatusDot(status: SidebarRowStatus | null): string | null {
+  return status && status.tone !== "muted" && status.tone !== "working" ? STATUS_DOT_CLS[status.tone] : null;
+}
 
-/** What the row's 16px leading slot shows: the project logo at rest, the logo
- * loader while archiving, the agent loader while working, and a dot for a
- * child in its parent's project. Folders and legacy Design workspaces keep
- * their own mark. */
+export type SidebarRowLead = "archiving" | "working" | "status-dot" | "idle-dot" | "folder" | "design" | "logo";
+
+/** What the row's 16px leading slot shows. The logo stays, even while an agent
+ * works; the logo loader takes it while archiving. A dot lead (a child in its
+ * parent's project, or any row under a repository header, where the logo
+ * would only repeat the header) carries the loader, the status dot or a faint
+ * idle dot instead. Folders and legacy Design workspaces keep their own mark. */
 export function sidebarRowLead(args: {
   archiving: boolean;
   working: boolean;
-  sameProjectChild: boolean;
+  dotLead: boolean;
+  statusDot: boolean;
   folder: boolean;
   design: boolean;
 }): SidebarRowLead {
   if (args.archiving) return "archiving";
-  if (args.working) return "working";
-  if (args.sameProjectChild) return "child";
   if (args.folder) return "folder";
   if (args.design) return "design";
+  // The mark follows the status word: a dot status outranks Working (another
+  // chat may work while one waits on the user), else the loader, else idle.
+  if (args.dotLead) return args.statusDot ? "status-dot" : args.working ? "working" : "idle-dot";
   return "logo";
+}
+
+/** The mark at the right end of line 1 (Compact: of the one line): the status
+ * dot when its status outranks Working, else the agent loader. A dot lead already carries it, unless the row
+ * keeps a folder or Design mark there. */
+export function sidebarRowEndMark(args: {
+  archiving: boolean;
+  working: boolean;
+  dotLead: boolean;
+  statusDot: boolean;
+  folder?: boolean;
+  design?: boolean;
+}): "loader" | "dot" | null {
+  if (args.archiving || (args.dotLead && !args.folder && !args.design)) return null;
+  if (args.statusDot) return "dot";
+  return args.working ? "loader" : null;
+}
+
+/** Compact shows its time only when no loader or status dot speaks for it. */
+export function sidebarCompactShowsTime(args: { working: boolean; statusDot: boolean }): boolean {
+  return !args.working && !args.statusDot;
 }
 
 const CLOUD_ERROR = new Set(["error", "failed", "setup_failed", "unhealthy"]);
 
-/** The status word a row shows; null leaves line 2 to the time alone. */
+/** The status word a row shows; null leaves line 2 to the time alone. A
+ * setup failure the user has acknowledged is passed in as false. */
 export function sidebarRowStatus(args: {
   archiving: boolean;
   setupFailed: boolean;
@@ -94,17 +127,26 @@ export function sidebarRowStatus(args: {
   working: boolean;
   unread: boolean;
 }): SidebarRowStatus | null {
-  if (args.archiving) return { label: "Archiving…", tone: "muted" };
-  if (args.setupFailed) return { label: "Failed", tone: "failed" };
-  if (args.cloudStatus && CLOUD_ERROR.has(args.cloudStatus)) return { label: "Cloud error", tone: "failed" };
+  if (args.archiving) return { label: "Archiving", tone: "muted" };
+  // The cloud catalog maps a machine error to a failed setup, so a cloud
+  // error names itself first; only its own setup_failed is a setup failure.
+  const cloudError = !!args.cloudStatus && CLOUD_ERROR.has(args.cloudStatus);
+  if (cloudError && args.cloudStatus !== "setup_failed") return { label: "Cloud error", tone: "failed" };
+  if (args.setupFailed) return { label: "Setup failed", tone: "failed" };
+  if (cloudError) return { label: "Cloud error", tone: "failed" };
   if (args.awaiting === "input") return { label: "Needs input", tone: "attention" };
   if (args.awaiting === "plan") return { label: "Plan ready", tone: "attention" };
-  if (args.working) return { label: "Working", tone: "muted" };
+  if (args.working) return { label: "Working", tone: "working" };
   const cloud = args.cloudStatus ? cloudMarkState(args.cloudStatus) : null;
-  if (cloud === "starting") return { label: "Waking…", tone: "muted" };
+  if (cloud === "starting") return { label: "Waking", tone: "muted" };
   if (args.unread) return { label: "Done", tone: "done" };
   if (cloud === "stopped") return { label: "Asleep", tone: "muted" };
   return null;
+}
+
+/** Whether a cloud catalog status reads as an error the user must see. */
+export function cloudStatusIsError(status: string | null | undefined): boolean {
+  return !!status && CLOUD_ERROR.has(status);
 }
 
 function openPull(pull: SidebarPullRequest) {

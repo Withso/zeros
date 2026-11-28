@@ -41,6 +41,7 @@ import {
 } from "./design-layout-controls";
 import { designLayoutChildrenSummary } from "./design-layout-children";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
+import { parseDesignGradient } from "./design-fill-values";
 import {
   InspectorGlyph,
   InspectorGroup,
@@ -57,6 +58,7 @@ import { DesignStrokeSection } from "./design-stroke-editor";
 import {
   designPaintRemovalStyles,
   isDesignRuntimeStylePropertyAuthored,
+  isDesignRuntimeStylePropertyDirectlyAuthored,
   readDesignComputedStyle,
 } from "./design-style-values";
 import { DesignTypographySection } from "./design-typography-editor";
@@ -281,22 +283,48 @@ export function DesignStyleEditor({
   const independentCorners = cornersOpen || cornersDiffer;
   const blendMode = styleValue(details, "mix-blend-mode", "normal");
 
+  const fillImage = styleValue(details, "background-image", "none");
+  const authoredFillImage = details.authoredStyles?.["background-image"]?.value;
+  const editableFillImage =
+    authoredFillImage && parseDesignGradient(authoredFillImage)
+      ? authoredFillImage
+      : fillImage;
   const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
+  const selection = layoutParents ?? [details];
+  const textBackgroundMixed = designStyleMixed(
+    selection,
+    selectionCount,
+    "background-color",
+  );
+  const textBackgroundColor = styleValue(
+    details,
+    "background-color",
+    "transparent",
+  );
+  const textBackgroundToken = useDesignStyleToken(details, "background-color");
+  const textBackgroundVisible =
+    textLayer &&
+    details.textEditable === true &&
+    !textBackgroundMixed &&
+    (details.authoredStyles?.["background-color"] !== undefined ||
+      isDesignRuntimeStylePropertyDirectlyAuthored(
+        details.authoredStyleProperties,
+        "background-color",
+      ) ||
+      !designFillIsEmpty(textBackgroundColor, "none"));
   const confirmedFillColor = styleValue(
     details,
     fillProperty,
     textLayer ? "currentColor" : "transparent",
   );
-  const fillImage = styleValue(details, "background-image", "none");
   // An added fill is a row at once, as in Figma, while its save lands.
   const [addedFill, setAddedFill] = useState<string | null>(null);
-  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, fillImage);
+  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, editableFillImage);
   useEffect(() => {
-    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, fillImage))) setAddedFill(null);
-  }, [addedFill, confirmedFillColor, details.oid, fillImage]);
+    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
+  }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
   const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
-  const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
     selection,
     selectionCount,
@@ -309,9 +337,24 @@ export function DesignStyleEditor({
     !fillAdding &&
     !textLayer &&
     !fillMixed &&
-    designFillIsEmpty(fillColor, fillImage) &&
+    designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
+  // Until fills are a true stack, Add appears only where the write cannot
+  // replace an authored or visible solid fill on any selected layer.
+  const fillCanAdd =
+    !textLayer &&
+    selection.every((node) => {
+      const color = styleValue(node, "background-color", "transparent");
+      return (
+        designFillIsEmpty(color, "none") &&
+        !isDesignRuntimeStylePropertyAuthored(
+          node.authoredStyleProperties,
+          "background-color",
+          color,
+        )
+      );
+    });
 
   const transitionDuration = styleValue(details, "transition-duration", "0s");
   const transitionActive =
@@ -559,7 +602,7 @@ export function DesignStyleEditor({
         empty={fillEmpty}
         data-design-fill-section=""
         actions={
-          fillEmpty ? (
+          fillCanAdd ? (
             <>
               <MotionPropertyAction
                 label="fill"
@@ -574,17 +617,13 @@ export function DesignStyleEditor({
                 label="Add fill"
                 disabled={disabled}
                 onClick={() => {
-                  if (!textLayer) {
+                  if (fillEmpty) {
                     requestDesignPaintPicker("background-color");
                     setAddedFill(details.oid);
                   }
-                  void commit(
-                    {
-                      "background-color": NEW_FILL_COLOR,
-                      "background-image": "none",
-                    },
-                    "fill",
-                  ).catch(() => setAddedFill(null));
+                  void commit({ "background-color": NEW_FILL_COLOR }, "fill").catch(() =>
+                    setAddedFill(null),
+                  );
                 }}
               >
                 <Plus />
@@ -617,6 +656,7 @@ export function DesignStyleEditor({
             <DesignFillEditor
               color={fillColor}
               image={fillImage}
+              editableImage={editableFillImage}
               {...fillToken}
               position={styleValue(details, "background-position", "0% 0%")}
               size={styleValue(details, "background-size", "auto")}
@@ -657,6 +697,40 @@ export function DesignStyleEditor({
             ) : null}
           </div>
         </div>
+        {textBackgroundVisible ? (
+          <div className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-1">
+            <span className="zd-field-label w-6" aria-hidden="true">
+              Bg
+            </span>
+            <DesignColorField
+              value={textBackgroundColor}
+              label="Background"
+              property="background-color"
+              disabled={disabled}
+              {...textBackgroundToken}
+              onPreview={(color) => preview({ "background-color": color })}
+              onCancelPreview={cancelPreview}
+              onCommit={(color) =>
+                commit({ "background-color": color }, "background")
+              }
+            />
+            <InspectorIconButton
+              label="Remove background"
+              disabled={disabled}
+              onClick={() =>
+                commit(
+                  designPaintRemovalStyles(
+                    "background-color",
+                    details.authoredStyleProperties,
+                  ),
+                  "background",
+                )
+              }
+            >
+              <Minus />
+            </InspectorIconButton>
+          </div>
+        ) : null}
         {!textLayer &&
         styleValue(details, "background-blend-mode", "normal") !== "normal" ? (
           <InspectorSelect

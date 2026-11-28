@@ -60,6 +60,8 @@ function harness(connected = true) {
     presentKnownEmptyLocalTranscript, consumeFreshCloudChat, transcriptCacheFor, presentCachedTranscript, canReplaceCloudTranscript,
     bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, forgetFreshLocalChat,
     prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } },
+    restoreLocalQueueRef: { current: vi.fn(async () => {}) },
+    discardLocalQueueRef: { current: vi.fn() },
   };
   const resetMaps = ["cancelGenerationsRef", "promptAbortRef", "sendingChatsRef", "ensureInFlightRef", "loadFlightKeysRef",
     "loadFlightAdoptOnlyRef", "prebindDirtySessionsRef", "prebindGoalSnapshotsRef", "sendQueueRef", "queueHeldRef",
@@ -80,6 +82,8 @@ function harness(connected = true) {
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return {
     hydrate: context.hydrate as (chatId: string) => Promise<void>, read, resolve, pendingHydrates,
+    restoreLocalQueue: (context.restoreLocalQueueRef as { current: ReturnType<typeof vi.fn> }).current,
+    reconcile: context.reconcile as (chatId: string) => Promise<void>,
     subscribeToCache: context.subscribeToCache as () => () => void,
     resetContext: context.resetContext as (chatId: string) => void,
     prepare: context.prepare as (chatId: string) => Promise<void> | null,
@@ -177,6 +181,8 @@ describe("conversation context reset", () => {
     await preparation;
     expect(slot("chat-1")?.messages).toEqual(messages);
     expect(slot("chat-1")?.hasTranscript).toBe(messages.length > 0);
+    // Saved Local follow-ups return only once authoritative history is resident.
+    expect(h.restoreLocalQueue).toHaveBeenCalledWith("chat-1");
   });
 
   it("ignores a pre-reset history read that finishes after the reset's canonical read", async () => {
@@ -256,12 +262,26 @@ describe("Local transcript hydration", () => {
     expect(localTranscriptCache.peek("chat-1")?.messages).toBe(messages);
   });
 
+  it("keeps a Local queued bubble whose payload is still queued through a history refresh, and drops one that is not", async () => {
+    const queued = (id: string): AgentTextMessage => ({ ...user(id), queued: true });
+    useSessionsStore.getState().setSession("chat-q", { ...BLANK, cwd: "/repo", transcriptState: "resident",
+      messages: [user("a"), agent("a-answer"), queued("waiting"), queued("orphan")] });
+    const h = harness();
+    h.refs.sendQueueRef.current.set("chat-q", [{ bubbleId: "waiting", args: [] }]);
+    const refresh = h.reconcile("chat-q");
+    h.resolve({ messages: [user("a"), agent("a-answer"), agent("more")], source: "local" });
+    await refresh;
+    expect(slot("chat-q")?.messages.map(message => message.id)).toEqual(["a", "a-answer", "more", "waiting"]);
+  });
+
   it("opens a chat this renderer just created without a read or a loading state", async () => {
     markFreshLocalChat("chat-new", "/repo");
     const h = harness();
     await h.hydrate("chat-new");
     expect(h.read).not.toHaveBeenCalled();
     expect(slot("chat-new")).toMatchObject({ transcriptState: "resident", messages: [], hasTranscript: false });
+    // A new chat has nothing saved, but reading marks its queue as savable.
+    expect(h.restoreLocalQueue).toHaveBeenCalledWith("chat-new");
     // Consumed: a later cold reopen reads normally.
     expect(takeFreshLocalChat("chat-new")).toBe(false);
   });

@@ -78,6 +78,14 @@ import {
 import { getActiveOrganizationSnapshot, getActiveOrganizationIdSnapshot, getTeamStoreState } from "../features/team/team-store";
 import { filterRowsForOrganization, filterProjectsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { buildSidebarWorkspaceEntries, rowsShownForPlacements, sidebarNeighborAfterRemoval, sidebarWorkspaceListFilter } from "../shell/sidebar-workspace-model";
+import { sidebarGroupingId, sidebarProjectionArgs } from "../shell/sidebar-projection";
+import { filterSidebarWorkspaces, type SidebarWorkspaceSignal } from "../shell/sidebar-view-model";
+import { readSidebarWorkspaceSignals, sidebarChatIdsByWorkspace } from "../shell/use-sidebar-workspace-signals";
+import { cloudWorkspaceIsError } from "../shell/sidebar-cloud-mark";
+import { getPrIslandKind } from "../shell/pr/pr-island-state-store";
+import { pullRequestTarget } from "./workspace-repositories";
+import { draftChatIdsByWorkspace } from "./composer-draft-presence";
+import { setupFailureAcknowledged, setupFailureShown } from "./setup-failure-acknowledgements";
 import { sidebarWorkspaceActivity } from "../shell/sidebar-workspace-activity";
 import { getSidebarListPreferences, sidebarHiddenPlacements, sidebarRepositoryFilterOwner, sidebarRepositoryIds } from "./sidebar-list-preferences";
 import {
@@ -145,15 +153,44 @@ function pickRepointTarget(leaving: Workspace): {
   );
   const filterOwner = sidebarRepositoryFilterOwner(getTeamStoreState().me?.user.id, organizationId);
   const hidden = localWorkShowsEverywhere() ? sidebarHiddenPlacements(filterOwner) : [];
+  const filter = sidebarWorkspaceListFilter(state.workspaceListFilter);
+  const preferences = getSidebarListPreferences();
+  const view = preferences.view;
+  // Removal lands only where the sidebar lists rows: its View filters and its
+  // grouping's order and hidden groups, from the same projection it renders.
+  // The departing row stays as the anchor even when the filters drop it.
+  const chatIds = sidebarChatIdsByWorkspace(state.chats, cached);
+  const lookup = readSidebarWorkspaceSignals(chatIds, draftChatIdsByWorkspace(state.chats, cached));
+  const signalOf = (workspace: Workspace): SidebarWorkspaceSignal => ({
+    ...lookup(workspace.id),
+    setupFailed: setupFailureShown(workspace, setupFailureAcknowledged(workspace.id)),
+    cloudError: cloudWorkspaceIsError(workspace.path),
+  });
+  const islandOf = (workspace: Workspace) => getPrIslandKind(pullRequestTarget(workspace), workspace.prNumber);
+  const activeAtByWorkspaceId = sidebarWorkspaceActivity(cached, state.chats, state.workspaceActivityByFolder);
+  const shown = filterSidebarWorkspaces(rowsShownForPlacements(cached, hidden), view, signalOf, undefined, islandOf);
+  const listed = shown.some((workspace) => workspace.id === leaving.id) ? shown : [...shown, leaving];
   const entries = buildSidebarWorkspaceEntries({
-    filter: sidebarWorkspaceListFilter(state.workspaceListFilter),
-    sort: getSidebarListPreferences().sort,
+    filter,
+    sort: preferences.sort,
+    ...sidebarProjectionArgs({
+      view,
+      sort: preferences.sort,
+      groupingId: sidebarGroupingId(view, filter),
+      projects,
+      unifiedPlacements: localWorkShowsEverywhere(),
+      signalOf,
+      activeAt: (workspace) => activeAtByWorkspaceId.get(workspace.id),
+      ownerOf: () => null,
+      islandOf,
+      keepWorkspaceId: leaving.id,
+    }),
     repositoryIds: sidebarRepositoryIds(filterOwner),
-    workspaces: rowsShownForPlacements(cached, hidden),
+    workspaces: listed,
     pending: rowsShownForPlacements(pending, hidden),
     ...(localWorkShowsEverywhere() ? { projectGroupOf: projectGroupLookup(projects) } : {}),
     projects,
-    activity: { activeAtByWorkspaceId: sidebarWorkspaceActivity(cached, state.chats, state.workspaceActivityByFolder) },
+    activity: { activeAtByWorkspaceId },
   });
   const next = sidebarNeighborAfterRemoval(entries, leaving, archivingIds);
   if (next?.kind === "pending" && next.pending.path) {

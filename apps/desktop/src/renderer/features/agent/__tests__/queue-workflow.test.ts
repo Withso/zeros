@@ -9,6 +9,14 @@ import { isCloudWorkspace, parseCloudWorkspaceKey } from "../../../platform/brid
 import { hasBackgroundAgentWork } from "../background-task-state";
 import { queuedTranscriptPresentation } from "./helpers/queued-transcript-presentation";
 import { definitiveCloudStopFailure } from "../cloud-turn-presentation";
+import type { LocalQueueJournal } from "../local-queue-journal";
+// Loaded lazily so this suite still runs (and fails on its assertions) on a
+// tree without the journal, which is how its zstack replay proves the bug.
+const journalModule = await import("../local-queue-journal").catch(() => undefined);
+const createMemoryLocalQueueJournal = (): LocalQueueJournal =>
+  journalModule?.createMemoryLocalQueueJournal() ?? { read: async () => [], write: async () => {} };
+const localQueuedPrompt = journalModule?.localQueuedPrompt;
+const restoredLocalQueue = journalModule?.restoredLocalQueue;
 
 // Exercise the actual provider callbacks with an in-memory bridge/store. This
 // keeps Stop/Send now races deterministic without mounting unrelated app UI.
@@ -37,6 +45,10 @@ const names = new Set([
   "editQueued",
   "removeQueued",
   "sendPrompt",
+  "isLocalQueueChat",
+  "saveLocalQueue",
+  "restoreLocalQueue",
+  "discardLocalQueue",
 ]);
 const callbacks: string[] = [];
 function collect(node: ts.Node): void {
@@ -51,7 +63,7 @@ function collect(node: ts.Node): void {
 }
 collect(ast);
 const code = ts.transpileModule(
-  callbacks.join("\n") + `\nglobalThis.actions = {${[...names].filter(name => !["flushQueuedPrompt", "refreshQueuedAttachments"].includes(name)).join(",")}};`,
+  callbacks.join("\n") + `\nglobalThis.actions = {${[...names].filter(name => !["flushQueuedPrompt", "refreshQueuedAttachments", "isLocalQueueChat"].includes(name)).join(",")}};`,
   {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
@@ -60,7 +72,7 @@ const code = ts.transpileModule(
   },
 ).outputText;
 
-function setup(agentId = "claude", status = "streaming") {
+function setup(agentId = "claude", status = "streaming", journal: LocalQueueJournal = createMemoryLocalQueueJournal()) {
   type Entry = { bubbleId: string; args: unknown[]; steerRequest?: unknown };
   const queue = new SendQueue<Entry>();
   const requests: Array<{
@@ -106,6 +118,11 @@ function setup(agentId = "claude", status = "streaming") {
   const flush = new Map<string, string>();
   const context: any = {
     cloudPrompts: { available: () => false }, migrateCloudSends: vi.fn(async () => {}),
+    localQueueJournal: () => journal,
+    localQueuedPrompt,
+    restoredLocalQueue,
+    parseCloudScopedId: () => null,
+    localQueueReadRef: { current: new Set<string>() },
     ...lifecycle,
     hasBackgroundAgentWork,
     definitiveCloudStopFailure,
@@ -827,5 +844,82 @@ describe("ARCH receipt-owned optimistic steering", () => {
       expect(h.queue.get("chat")!.find(entry => entry.bubbleId === "C")!.steerRequest).toBeDefined();
       expect(h.queue.isPaused("chat")).toBe(true);
     }
+  });
+});
+
+describe("Local queued follow-ups across a restart", () => {
+  const restart = (journal: LocalQueueJournal) => {
+    const h = setup("claude", "ready", journal);
+    // A fresh renderer: history is resident, nothing is queued in memory.
+    h.queue.delete("chat");
+    h.store.sessions.chat.transcriptState = "resident";
+    h.store.sessions.chat.messages = [{ id: "A", kind: "text", role: "agent", text: "Earlier reply", createdAt: 1 }];
+    return h;
+  };
+
+  it("restores saved follow-ups paused, in order, without sending them", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    const before = setup("claude", "streaming", journal);
+    before.context.localQueueReadRef.current.add("chat");
+    before.actions.saveLocalQueue("chat");
+    await vi.waitFor(async () => expect((await journal.read("chat")).map(entry => entry.text)).toEqual(["B", "C", "D"]));
+
+    const after = restart(journal);
+    await after.actions.restoreLocalQueue("chat");
+    expect(after.sent).toEqual([]);
+    expect(after.queue.isPaused("chat")).toBe(true);
+    expect(after.store.sessions.chat.queuePaused).toBe(true);
+    expect(after.queue.get("chat")?.map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]);
+    expect(after.store.sessions.chat.messages.map((message: { id: string; queued?: boolean }) => [message.id, !!message.queued]))
+      .toEqual([["A", false], ["B", true], ["C", true], ["D", true]]);
+
+    // An explicit send resumes the queue and delivers the first follow-up.
+    after.actions.resumeQueue("chat");
+    after.actions.drainNextQueued("chat");
+    await vi.waitFor(() => expect(after.sent[0]?.[1]).toBe("B"));
+  });
+
+  it("keeps a claimed follow-up saved until it leaves the queue for dispatch", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    const h = setup("claude", "streaming", journal);
+    h.context.localQueueReadRef.current.add("chat");
+    // A claim (for example while attachments are re-checked) is not delivery.
+    h.queue.claim("chat", "B");
+    h.actions.saveLocalQueue("chat");
+    await vi.waitFor(async () => expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["B", "C", "D"]));
+    h.queue.set("chat", h.queue.get("chat")!.filter(entry => entry.bubbleId !== "B"));
+    h.actions.saveLocalQueue("chat");
+    await vi.waitFor(async () => expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["C", "D"]));
+  });
+
+  it("does not overwrite a saved queue before it has been read back", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    await journal.write("chat", [{ bubbleId: "saved", createdAt: 1, text: "Saved" }]);
+    const h = restart(journal);
+    h.actions.saveLocalQueue("chat");
+    await Promise.resolve();
+    expect((await journal.read("chat")).map(entry => entry.bubbleId)).toEqual(["saved"]);
+  });
+
+  it("erases a closed chat's saved follow-ups even when they were never read back", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    await journal.write("chat", [{ bubbleId: "saved", createdAt: 1, text: "Saved" }]);
+    const h = restart(journal);
+    h.actions.discardLocalQueue("chat");
+    await vi.waitFor(async () => expect(await journal.read("chat")).toEqual([]));
+    // A later reopen has nothing to bring back.
+    await h.actions.restoreLocalQueue("chat");
+    expect(h.queue.get("chat")).toBeUndefined();
+  });
+
+  it("keeps cloud chats out of the Local journal", async () => {
+    const journal = createMemoryLocalQueueJournal();
+    const h = setup("claude", "streaming", journal);
+    h.store.sessions.chat.cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    h.context.localQueueReadRef.current.add("chat");
+    h.actions.saveLocalQueue("chat");
+    await h.actions.restoreLocalQueue("chat");
+    await Promise.resolve();
+    expect(await journal.read("chat")).toEqual([]);
   });
 });

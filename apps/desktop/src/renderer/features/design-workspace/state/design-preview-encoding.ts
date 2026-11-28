@@ -48,34 +48,50 @@ interface EncodeWorker {
 
 /** Chromium encodes OffscreenCanvas WebP on the calling thread: a new frame's
  * pictures blocked the canvas for hundreds of milliseconds right after an
- * edit. One worker encodes them instead; where none can start (or it dies),
- * encoding stays on this thread so pictures are never lost. */
-export function createDesignPreviewEncoder(createWorker: (() => EncodeWorker) | null) {
-  let worker: EncodeWorker | null = null, failed = !createWorker, next = 0;
-  const pending = new Map<number, { resolve(blob: Blob): void; reject(error: Error): void; fallback(): Promise<Blob> }>();
+ * edit. Workers encode them instead: one while pictures trickle in, up to
+ * `workers` when a page opens and hundreds arrive together. Where none can
+ * start (or one dies), encoding stays on this thread so pictures are never lost. */
+export function createDesignPreviewEncoder(createWorker: (() => EncodeWorker) | null, workers = 1) {
+  const limit = Math.max(1, Math.floor(workers));
+  const pool: Array<{ worker: EncodeWorker; pending: number }> = [];
+  let failed = !createWorker, next = 0;
+  const pending = new Map<number, { slot: (typeof pool)[number]; resolve(blob: Blob): void; reject(error: Error): void; fallback(): Promise<Blob> }>();
   const abandon = () => {
-    failed = true; worker?.terminate(); worker = null;
+    failed = true;
+    for (const slot of pool.splice(0)) slot.worker.terminate();
     for (const [id, request] of pending) { pending.delete(id); request.fallback().then(request.resolve, request.reject); }
   };
-  const start = (): EncodeWorker | null => {
-    if (worker || failed) return worker;
-    try { worker = createWorker!(); } catch { failed = true; return null; }
+  const start = (): (typeof pool)[number] | null => {
+    if (failed) return null;
+    const idle = pool.find(slot => slot.pending === 0);
+    if (idle) return idle;
+    if (pool.length >= limit) return pool.reduce((least, slot) => slot.pending < least.pending ? slot : least);
+    let worker: EncodeWorker;
+    try { worker = createWorker!(); } catch {
+      if (pool.length) return pool.reduce((least, slot) => slot.pending < least.pending ? slot : least);
+      failed = true;
+      return null;
+    }
+    const slot = { worker, pending: 0 };
+    pool.push(slot);
     worker.addEventListener("message", event => {
       const data = event.data as DesignPreviewEncodeReply, request = pending.get(data.id);
       if (!request) return;
       pending.delete(data.id);
+      request.slot.pending--;
       if ("blob" in data) request.resolve(data.blob); else request.reject(new Error(data.error));
     });
     worker.addEventListener("error", abandon);
-    return worker;
+    return slot;
   };
   const run = (message: EncodeRequest, fallback: () => Promise<Blob>): Promise<Blob> => {
-    const target = start();
-    if (!target) return fallback();
+    const slot = start();
+    if (!slot) return fallback();
     const id = ++next;
+    slot.pending++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject, fallback });
-      target.postMessage({ ...message, id } as DesignPreviewEncodeRequest);
+      pending.set(id, { slot, resolve, reject, fallback });
+      slot.worker.postMessage({ ...message, id } as DesignPreviewEncodeRequest);
     });
   };
   return {

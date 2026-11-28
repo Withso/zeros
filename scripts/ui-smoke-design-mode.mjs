@@ -81,10 +81,17 @@ export async function runDesignModeSmoke({ page, check }) {
     true,
   );
   const frame = page.locator("[data-composer-design-frame]");
+  const attachFrame = page.getByRole("button", { name: "Attach current frame", exact: true });
+  await expect(frame).toHaveCount(0);
+  await attachFrame.click();
   await expect(frame).toHaveText("phone.html");
   await page.getByRole("button", { name: "Deselect frame", exact: true }).click();
+  await expect(frame).toHaveText("phone.html");
+  await frame.click();
   await expect(frame).toHaveCount(0);
   await page.getByRole("button", { name: "Select phone", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  await attachFrame.click();
   await expect(frame).toHaveText("phone.html");
   await page.getByRole("button", { name: "Include frame image", exact: true }).click();
   await expect(page.getByRole("button", { name: "Include frame image", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -102,6 +109,8 @@ export async function runDesignModeSmoke({ page, check }) {
   await page.getByRole("button", { name: "Select tablet", exact: true }).click();
   await expect(frame).toHaveText("phone.html");
   await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  await attachFrame.click();
   await expect(frame).toHaveText("tablet.html");
   await page.getByRole("button", { name: "Switch conversation", exact: true }).click();
   await expect(frame).toHaveText("phone.html");

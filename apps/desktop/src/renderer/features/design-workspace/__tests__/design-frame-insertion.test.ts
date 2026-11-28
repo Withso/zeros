@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import {
   canInsertDesignFrame,
+  designUngroupOperations,
   designWrapInFlow,
+  designWrapSelectionOperations,
   designShiftAConvertsInPlace,
   designDrawnFrameWrapOperations,
   designFrameInsertionOperations,
   designTreeChildIds,
+  designSizeInChildCoordinateSpace,
 } from "../design-frame-insertion";
 
 const parent: DesignRuntimeNodeDetails = {
@@ -88,6 +91,92 @@ describe("child frame insertion", () => {
     expect(ops.some(op => op.type === "node.set-styles" && op.nodeId === parent.oid)).toBe(false);
     expect(ops.find(op => op.type === "node.set-html")?.html).toContain("position:absolute;left:210px;top:220px;");
   });
+  it("groups absolute layers into a transparent wrapper without changing their canvas positions", () => {
+    const absolute = (oid: string, x: number, width = 61) => ({
+      ...parent,
+      oid,
+      styles: {
+        ...parent.styles,
+        position: "absolute",
+        left: `${x}px`,
+        top: "30px",
+        width: `${width}px`,
+        height: "60px",
+        boxSizing: "border-box",
+      },
+      layout: {
+        parentId: "parent",
+        x,
+        y: 30,
+        parentWidth: 200,
+        parentHeight: 200,
+        parentDisplay: "block",
+        parentPosition: "relative",
+        isContainingBlock: true,
+      },
+      box: { x, y: 30, width, height: 60, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+      rect: { x, y: 30, width, height: 60 },
+    }) as DesignRuntimeNodeDetails;
+    const ops = designWrapSelectionOperations(
+      parent,
+      [absolute("a", 10), absolute("b", 84, 64)],
+      "selection-group-test",
+      "group",
+    );
+    const html = ops.find((op) => op.type === "node.set-html");
+    expect(html).toMatchObject({
+      nodeId: "parent",
+      html: expect.stringContaining("left:10px;top:30px;width:138px;height:60px"),
+    });
+    expect(html?.html).toContain("background-color:transparent");
+    expect(
+      ops.find((op) => op.type === "node.move" && op.nodeId === "selection-group-test"),
+    ).toMatchObject({ beforeId: "b" });
+
+    expect(
+      ops.find(
+        (op) => op.type === "node.set-styles" && op.nodeId === "b",
+      ),
+    ).toMatchObject({
+      styles: { left: "74px", top: "0px" },
+    });
+  });
+
+  it("rejects ungrouping an ordinary drawn frame", () => {
+    const drawn = {
+      ...parent,
+      oid: "frame-drawn",
+      layout: { parentId: "parent", x: 10, y: 30, parentWidth: 200, parentHeight: 200, parentDisplay: "block", parentPosition: "relative", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    expect(() => designUngroupOperations(parent, drawn, [])).toThrow(
+      /select a group/i,
+    );
+  });
+
+  it("ungroups a generated wrapper by restoring children to its parent", () => {
+    const group = {
+      ...parent,
+      oid: "selection-group-test",
+      styles: { ...parent.styles, position: "absolute", left: "10px", top: "30px" },
+      layout: { parentId: "parent", x: 10, y: 30, parentWidth: 200, parentHeight: 200, parentDisplay: "block", parentPosition: "relative", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    const child = {
+      ...parent,
+      oid: "a",
+      styles: { ...parent.styles, position: "absolute", left: "4px", top: "0px" },
+      layout: { parentId: "selection-group-test", x: 4, y: 0, parentWidth: 138, parentHeight: 60, parentDisplay: "block", parentPosition: "absolute", isContainingBlock: true },
+    } as DesignRuntimeNodeDetails;
+    const ops = designUngroupOperations(parent, group, [child]);
+    expect(ops).toContainEqual(
+      expect.objectContaining({ type: "node.delete", nodeId: "selection-group-test" }),
+    );
+    expect(
+      ops.find(
+        (op) => op.type === "node.set-styles" && op.nodeId === "a",
+      ),
+    ).toMatchObject({ styles: { left: "14px" } });
+  });
+
   it("keeps the slot block layers reserve when Shift+A wraps them", () => {
     // Two stacked paragraphs of an auto-height card: the wrapper stays in
     // flow where the first one stood, so the card keeps its height.
@@ -120,6 +209,20 @@ describe("child frame insertion", () => {
     }).find((entry) => entry.type === "node.set-html");
     expect(operation?.html).toContain("display:block;");
     expect(operation?.html).toContain("background-color:#ffffff;opacity:1;"); // check:ui ignore-line -- authored canvas frame color, not editor chrome.
+  });
+  it("converts a drawn size into a scaled parent's child coordinates", () => {
+    expect(
+      designSizeInChildCoordinateSpace(parent, { x: 40, y: 20 }),
+    ).toEqual({ x: 20, y: 10 });
+  });
+  it("keeps a square drawn size nonzero inside a rotated parent", () => {
+    const half = Math.SQRT1_2;
+    expect(
+      designSizeInChildCoordinateSpace(
+        { ...parent, childCoordinateSpace: [half, -half, half, half, 10, 20] },
+        { x: 40, y: 40 },
+      ),
+    ).toEqual({ x: 40, y: 40 });
   });
   it("keeps the click-created default size inside a rotated and scaled parent", () => {
     const operations = designFrameInsertionOperations(
@@ -164,8 +267,8 @@ describe("child frame insertion", () => {
     });
   });
 
-  it.each(["flex", "grid"])(
-    "adds a normal frame to %s without rewriting the parent's layout",
+  it.each(["flex", "inline-flex", "grid", "inline-grid"])(
+    "adds a drawn frame to the end of %s flow without rewriting the parent",
     (display) => {
       const operations = designFrameInsertionOperations(
         { ...parent, styles: { ...parent.styles, display } },
@@ -174,17 +277,34 @@ describe("child frame insertion", () => {
         { x: 210, y: 220 },
       );
       expect(operations).toHaveLength(1);
-      expect(operations[0]).toMatchObject({
-        type: "node.set-html",
-        nodeId: "parent",
-      });
       const insertion = operations[0];
       if (insertion?.type !== "node.set-html")
         throw new Error("Missing insertion");
+      expect(insertion).toMatchObject({ nodeId: "parent", mode: "append" });
       expect(insertion.html).toContain(
         "display:block;position:relative;width:100px;height:100px;",
       );
       expect(insertion.html).not.toContain("left:");
     },
   );
+
+  it("places a drawn frame absolutely inside an ordinary block parent", () => {
+    const operations = designFrameInsertionOperations(
+      parent,
+      "child",
+      { x: 10, y: 20 },
+      { x: 210, y: 220 },
+    );
+    expect(operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: "parent",
+      styles: { position: "relative" },
+    });
+    const insertion = operations[1];
+    if (insertion?.type !== "node.set-html")
+      throw new Error("Missing insertion");
+    expect(insertion.html).toContain(
+      "display:block;position:absolute;left:0px;top:0px;width:100px;height:100px;",
+    );
+  });
 });

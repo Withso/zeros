@@ -8,7 +8,7 @@ function source(relativePath: string): string {
 }
 
 describe("live Run stream placement", () => {
-  it("keeps action streams in primary tabs, bottom tabs, and the sidebar", () => {
+  it("keeps action streams in primary tabs, bottom tabs, and the terminal list", () => {
     const terminalTab = source(
       "apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx",
     );
@@ -23,28 +23,22 @@ describe("live Run stream placement", () => {
     expect(terminalTab).toContain("<RunStream");
   });
 
-  it("marks every running workspace accent-text, selected or not", () => {
+  it("keeps the sidebar row free of the Run stream, while still naming the run", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
     const sidebar = source("apps/desktop/src/renderer/shell/app-sidebar.tsx");
-
-    expect(row).toContain("runActionRunning");
-    expect(row).toContain("<RunStream");
-    expect(sidebar).toContain("useWorkspaceRunActivitySync(realWorkspaces)");
+    // The Run tab and the Terminal show a live run; the row stays quiet so
+    // only agent work moves in the navigation.
+    expect(row).not.toContain("<RunStream");
+    expect(row).not.toContain("RunStream");
     expect(row).toContain("useAnyRunActionRunning(workspace.path)");
-    // A live run is the loudest thing a row can say, so it stays the accent
-    // colour in every row — dimming the unselected ones hid running work.
-    expect(row).toContain('<RunStream size={12} className="text-accent-text"');
-    expect(row).not.toMatch(/<RunStream[\s\S]{0,120}?active \?/);
-    expect(row).not.toContain(
-      "anyRunActionRunning && activeWorkspaceId === workspace.id",
-    );
+    expect(row).toMatch(/workspaceTabDescription\(\{\s*label,\s*runActionRunning,/);
+    expect(sidebar).toContain("useWorkspaceRunActivitySync(realWorkspaces)");
     expect(row).not.toContain("useRunStatuses");
   });
 
-  // Step 2: the ± counts left the row for the hover card; the stream stays.
-  it("keeps the stream on the row and hands the counts to the hover card", () => {
+  it("hands the ± counts to the hover card", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
@@ -53,11 +47,9 @@ describe("live Run stream placement", () => {
     );
     expect(row).not.toContain("<WorkspaceChangeCounts");
     expect(row).toContain("changeLines={changeLines}");
-    expect(row).toMatch(/\{runActionRunning && \([\s\S]*?<RunStream/);
-    expect(row).not.toMatch(/runActionRunning \?[\s\S]{0,200}?<RunStream/);
   });
 
-  it("keeps the stream out of the truncation path", () => {
+  it("keeps the right end's marks out of the truncation path", () => {
     const row = source(
       "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );

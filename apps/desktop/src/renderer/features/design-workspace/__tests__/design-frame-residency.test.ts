@@ -139,6 +139,37 @@ describe("Design frame surface residency", () => {
     expect([...rested.sources].every(file => panning.sources.has(file))).toBe(true);
   });
 
+  it("keeps pictures in charge of passive frames until a zoom gesture rests", () => {
+    const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
+      sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
+    const input = { ...setup(frames), viewport: { width: 1440, height: 900 }, devicePixelRatio: 2, sourceSurfacesEnabled: false,
+      sourceReady: new Map(frames.map(frame => [frame.file, frame.sourceVersion])) };
+    const read = createDesignFrameResidencyReader();
+    expect(read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 } }).frames).toHaveLength(1000);
+    const zooming = read({ ...input, view: { zoom: 2, panX: 0, panY: 0 }, gesture: true });
+    expect(zooming.live.size).toBe(0);
+    expect(read({ ...input, view: { zoom: 2, panX: 0, panY: 0 }, gesture: true, selectedFrame: "0" }).live)
+      .toEqual(new Set(["0"]));
+    const rested = read({ ...input, view: { zoom: 2, panX: 0, panY: 0 } });
+    expect(rested.live.size).toBeGreaterThan(0);
+  });
+
+  // A gesture only holds back new passive documents. A frame already running
+  // one keeps it while the camera moves, even with a picture on file: tearing
+  // it down mid-pan drops its high-resolution tile until the gesture rests.
+  it("keeps already-live frames running through a gesture without admitting new ones", () => {
+    const frames = [frame("home.html", 0), frame("about.html", 240), frame("far.html", 4000)];
+    const read = createDesignFrameResidencyReader();
+    const rest = { ...setup(frames), view: { zoom: 4, panX: 0, panY: 0 } };
+    expect(read(rest).live).toEqual(new Set(["home.html", "about.html"]));
+    const panning = read({ ...rest, view: { zoom: 4, panX: -180, panY: 0 }, gesture: true });
+    expect(panning.live).toEqual(new Set(["home.html", "about.html"]));
+    // Panning onto a frame that was not live does not start its document yet.
+    const onFar = read({ ...rest, view: { zoom: 4, panX: -15800, panY: 0 }, gesture: true });
+    expect(onFar.live.has("far.html")).toBe(false);
+    expect(read({ ...rest, view: { zoom: 4, panX: -15800, panY: 0 } }).live.has("far.html")).toBe(true);
+  });
+
   it("keeps a zoom's page mounted between its steps, loads sources for large frames, and trims once the camera rests", () => {
     const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
       sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));

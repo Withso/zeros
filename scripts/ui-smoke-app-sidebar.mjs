@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { openSidebarSubmenu, selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
+import { closeSidebarMenu, openSidebarSubmenu, selectSidebarGrouping, sidebarMenuTrigger } from "./ui-smoke/sidebar-menu.mjs";
 import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
 import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
@@ -9,11 +9,10 @@ import { runChatWidthSmoke } from "./ui-smoke-chat-width.mjs";
 import { runWorkspaceHeaderSmoke } from "./ui-smoke-workspace-header.mjs";
 
 // App sidebar contract: Repository grouping by default with every workspace under
-// its repository; Status and None are also available; repository headers
-// swap their icon for a disclosure chevron on hover, keep + visible, and reveal
-// settings and ⋯ (Create workspace / Create from… / Configuration / Remove
-// repository); collapse is persisted per repository and never hides the
-// selected workspace.
+// its repository; Status and None are also available; repository headers keep
+// their logo and arrow, and reveal settings, ⋯ (Create workspace / Create
+// from… / Configuration / Remove repository) and + on hover; collapse is
+// persisted per repository and never hides the selected workspace.
 export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -78,36 +77,53 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     exact: true,
   });
   await moveAway();
-  await expect(plus).toBeVisible();
-  // Settings and ⋯ wait over the end of the name, unpainted and inert, so the
-  // name never re-truncates when they appear.
+  // Settings, ⋯ and + wait before the arrow, unpainted and inert, so the name
+  // never re-truncates when they appear; the logo and the arrow always show.
   const resting = (button) =>
     button.evaluate((node) => ({
       opacity: getComputedStyle(node.parentElement).opacity,
       pointerEvents: getComputedStyle(node).pointerEvents,
     }));
-  for (const action of [settings, more])
+  for (const action of [settings, more, plus])
     await expect
       .poll(() => resting(action))
       .toEqual({ opacity: "0", pointerEvents: "none" });
   const chip = zeros.locator("span.rounded-sm").first();
   const chevron = zeros.locator("svg.lucide-chevron-down");
-  await expect(chevron).toBeHidden();
+  await expect(chevron).toBeVisible();
+  await expect(chip).toBeVisible();
+  const restingFill = await zeros.evaluate((node) => getComputedStyle(node).backgroundColor);
   await zeros.hover();
-  await expect(zeros).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(zeros).not.toHaveCSS("background-color", restingFill);
   await expect(settings).toBeVisible();
   await expect(more).toBeVisible();
+  await expect(plus).toBeVisible();
   await expect(chevron).toBeVisible();
-  expect(await chip.evaluate((node) => getComputedStyle(node).visibility)).toBe(
-    "hidden",
-  );
+  expect(await chip.evaluate((node) => getComputedStyle(node).visibility)).toBe("visible");
+  const chevronBox = await chevron.boundingBox();
   const plusBox = await plus.boundingBox();
+  expect(plusBox.x + plusBox.width).toBeLessThanOrEqual(chevronBox.x + 1);
   await moveAway();
-  expect(await plus.boundingBox()).toEqual(plusBox);
+  expect(await chevron.boundingBox()).toEqual(chevronBox);
   check(
-    "Hover swaps the repository icon for a chevron and reveals settings and ⋯ beside the fixed +",
+    "Hover fills the repository header and reveals settings, ⋯ and + before the arrow; the logo stays",
     true,
   );
+
+  // The arrow is drawn over the full-row toggle; a click on the arrow itself
+  // reaches the toggle (the arrow and its wrapper are pointer-transparent).
+  const clickCenter = async (locator) => {
+    const box = await locator.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  };
+  const zerosArrowToggle = zeros.getByRole("button", { name: /^Zeros, \d+$/ });
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "true");
+  await clickCenter(zeros.locator("[data-sidebar-header-arrow]"));
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "false");
+  await clickCenter(zeros.locator("[data-sidebar-header-arrow]"));
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "true");
+  await moveAway();
+  check("Clicking a repository header's arrow collapses and expands it", true);
 
   await zeros.hover();
   await more.click();
@@ -240,30 +256,69 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   );
 
   // The logo's menu and its dialog render in portals; their clicks bubble
-  // through React to the row and must not open that row's workspace.
+  // through React to the row and must not open that row's workspace. Under a
+  // repository header rows carry a dot, so use the one-list view's logos.
+  await moveAway();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await selectFilter("None");
   const logo = page
     .locator('[data-workspace-tab="true"]:not([data-active="true"]) [data-sidebar-row-logo]')
     .first();
   const before = await state();
+  const logoRowId = await logo.evaluate((node) => node.closest("[data-workspace-id]").dataset.workspaceId);
+  // Record every hover card that opens from here on, however briefly.
+  await page.evaluate(() => {
+    window.__openedPreviews = [];
+    window.__previewRecorder = new MutationObserver(() => {
+      for (const node of document.querySelectorAll("[data-workspace-preview]")) {
+        const id = node.dataset.workspacePreview;
+        if (!window.__openedPreviews.includes(id)) window.__openedPreviews.push(id);
+      }
+    });
+    window.__previewRecorder.observe(document.body, { childList: true, subtree: true });
+  });
   await logo.click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Repository Settings", exact: true }).click();
+  // Leave the row, then come back in through the menu: React reports that as
+  // entering the row (the menu is its portalled child), as well as the focus.
+  const repositorySettings = page.getByRole("menuitem", { name: "Repository Settings", exact: true });
+  await moveAway();
+  await repositorySettings.hover();
+  await repositorySettings.click();
   // Wait for the menu's click to settle; a bubbled row click would open that
   // row's workspace and move the folder after the repository page appears.
   await expect(page.getByRole("menu")).toHaveCount(0);
   await expect.poll(async () => (await state()).page).toBe("repo");
   expect((await state()).folder).toBe(before.folder);
+  // Pointer entry and focus inside the portalled menu must not schedule the
+  // row's hover card. Hovering another row schedules its card later than any
+  // timer the menu could have left, so once that card opens the window has
+  // passed; the recorder must have seen only that card.
+  await moveAway();
+  const witnessId = await page
+    .locator(`[data-workspace-tab="true"]:not([data-workspace-id="${logoRowId}"])`)
+    .first()
+    .evaluate((node) => node.dataset.workspaceId);
+  await row(witnessId).hover();
+  await expect(page.locator(`[data-workspace-preview="${witnessId}"]`)).toBeVisible();
+  expect(await page.evaluate(() => {
+    window.__previewRecorder.disconnect();
+    return window.__openedPreviews;
+  })).toEqual([witnessId]);
+  await moveAway();
+  await expect(page.locator("[data-workspace-preview]")).toHaveCount(0);
   await row("ws-atlanta")
     .getByRole("button", { name: /^Open workspace atlanta/ })
     .click();
   await expect.poll(async () => (await state()).page).toBe("workspace");
-  check("Repository Settings from a row's logo opens the repository page, not the workspace", true);
+  await selectFilter("Repository");
+  check("Repository Settings from a row's logo opens the repository page, not the workspace, and leaves its hover card closed", true);
 
-  const zerosToggle = zeros.getByRole("button", { name: "Zeros", exact: true });
+  const zerosToggle = zeros.getByRole("button", { name: /^Zeros, \d+$/ });
   await zerosToggle.click();
   await expect(zerosToggle).toHaveAttribute("aria-expanded", "false");
   await expect(row("ws-boston")).toHaveCount(0);
   await expect(row("ws-atlanta")).toBeVisible();
-  const okitToggle = okit.getByRole("button", { name: "0kit", exact: true });
+  const okitToggle = okit.getByRole("button", { name: /^0kit, \d+$/ });
   await okitToggle.click();
   await expect(row("ws-paris-mumbai-city-docs")).toHaveCount(0);
   await moveAway();
@@ -283,11 +338,15 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   );
 
   await openSidebarSubmenu(page, "Group");
+  await openSidebarSubmenu(page, "Group by");
   expect(await page.getByRole("menuitemradio").allTextContents()).toEqual(
     expect.arrayContaining(["Repository", "Status", "None"]),
   );
   await page.getByRole("menuitemradio", { name: "None", exact: true }).click();
+  // Choosing keeps the menu open so several views can be tried in a row.
+  await expect(page.getByRole("menu", { name: "Group by" })).toBeVisible();
   await expect(headers).toHaveCount(0);
+  await closeSidebarMenu(page);
   expect(
     await page
       .locator("[data-workspace-tab]")
@@ -369,7 +428,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     true,
   );
 
-  // Geometry: repository and workspace rows are 32px; destinations stay 30px. All
+  // Geometry: repository headers are 28px and workspace rows 48px; destinations stay 30px. All
   // consecutive repository/workspace rows sit exactly 2px apart.
   await page.evaluate(() => sessionStorage.clear());
   await page.goto(harness, { waitUntil: "networkidle" });
@@ -383,7 +442,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
       selector,
     );
   expect(new Set(await heights("[data-sidebar-repository]"))).toEqual(
-    new Set([32]),
+    new Set([28]),
   );
   expect(new Set(await heights("[data-workspace-tab]"))).toEqual(
     new Set([48]),
@@ -428,30 +487,69 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   expect(destinations.padding).toEqual(["0px", "8px", "0px", "8px"]);
   expect(destinations.hugs).toBe(true);
   check(
-    "Repository rows are 32px, workspace rows 48px, 2px apart; the organization switcher hugs its name",
+    "Repository headers are 28px, workspace rows 48px, 2px apart; the organization switcher hugs its name",
     true,
   );
 
-  const section = page
-    .locator("[data-app-sidebar]")
-    .getByText("My workspaces", { exact: true })
-    .locator("..");
+  const section = page.locator('[data-app-sidebar] [data-sidebar-section="mine"]');
   const filterButton = page.getByRole("button", {
     name: "Filter workspaces",
     exact: true,
   });
-  await section.hover();
-  expect(
-    await section.evaluate((node) => getComputedStyle(node).backgroundColor),
-  ).toBe("rgba(0, 0, 0, 0)");
-  expect(
-    await filterButton.evaluate((node) => getComputedStyle(node).opacity),
-  ).toBe("1");
   await moveAway();
-  expect(
-    await filterButton.evaluate((node) => getComputedStyle(node).opacity),
-  ).toBe("0");
-  check("My workspaces reveals only its filter button on hover, with no row highlight", true);
+  const restingSection = await section.evaluate((node) => getComputedStyle(node).backgroundColor);
+  // The filter icon stays inside the header row, before the arrow, with no
+  // indicator; hovering fills the whole row like every other header.
+  expect(await filterButton.evaluate((node) => getComputedStyle(node).opacity)).toBe("1");
+  await expect(filterButton.locator("[data-filter-indicator]")).toHaveCount(0);
+  const [filterBox, arrowBox] = await Promise.all([
+    filterButton.boundingBox(),
+    section.locator("[data-sidebar-header-arrow]").boundingBox(),
+  ]);
+  expect(filterBox.x + filterBox.width).toBeLessThanOrEqual(arrowBox.x + 1);
+  await section.hover();
+  await expect(section).not.toHaveCSS("background-color", restingSection);
+  check("My workspaces fills on hover and keeps its filter icon, without a dot, before the arrow", true);
+  const sectionToggle = section.locator(":scope > button").first();
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "true");
+  await clickCenter(section.locator("[data-sidebar-header-arrow]"));
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "false");
+  await clickCenter(section.locator("[data-sidebar-header-arrow]"));
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "true");
+  await moveAway();
+  check("Clicking a section header's arrow collapses and expands it", true);
+
+  // Compact puts PR controls at the row's end. Hover's Archive must sit past
+  // them: a running row under its repository header carries its loader in the
+  // lead, so nothing else stands between its PR control and the edge.
+  await page.evaluate(() => window.appSidebarUpdateWorkspace("ws-boston", {
+    prNumber: 42, prState: "ready", prUrl: "https://github.com/example/zeros/pull/42",
+  }));
+  await moveAway();
+  await sidebarMenuTrigger(page).click();
+  const compactSwitch = page.getByRole("menuitemcheckbox", { name: /^Compact view/ });
+  await compactSwitch.click();
+  await expect(compactSwitch).toHaveAttribute("aria-checked", "true");
+  await closeSidebarMenu(page);
+  const bostonRow = row("ws-boston");
+  const prControl = bostonRow.locator("[data-pr-mark]").first();
+  await expect(prControl).toBeVisible();
+  await bostonRow.hover();
+  const archiveControl = bostonRow.getByRole("button", { name: /^Archive workspace/ });
+  await expect(archiveControl).toBeVisible();
+  const [prBox, archiveBox] = await Promise.all([prControl.boundingBox(), archiveControl.boundingBox()]);
+  expect(prBox.x + prBox.width).toBeLessThanOrEqual(archiveBox.x);
+  expect(await prControl.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return node === top || node.contains(top);
+  })).toBe(true);
+  await moveAway();
+  await sidebarMenuTrigger(page).click();
+  await compactSwitch.click();
+  await expect(compactSwitch).toHaveAttribute("aria-checked", "false");
+  await closeSidebarMenu(page);
+  check("In Compact, hover's Archive sits past the PR control, which keeps its own clicks", true);
 
   // Collapse: the panel-left toggle hides the sidebar, then floats over the
   // content's corner at the same position; Home's title row sits beside it on

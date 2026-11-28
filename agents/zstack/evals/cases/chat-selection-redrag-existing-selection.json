@@ -1,0 +1,9 @@
+{
+  "id": "chat-selection-redrag-existing-selection",
+  "kind": "seeded",
+  "area": "renderer-agents",
+  "fixedBy": "pr:1344",
+  "symptom": "The selection-popup Escape regression test tried to reselect the same text by dragging inside the existing HTML selection; Chromium treated it as a text drag, left an empty selection, and made main red without a product failure.",
+  "rule": "Browser selection regression tests must distinguish a new selection gesture from dragging the existing HTML selection; when asserting dismissal until the selection changes, select different text. See zstack-eval's test-only-fix seeding rule.",
+  "check": "pnpm test:git apps/desktop/src/renderer/features/agent/__tests__/chat-selection-popup.test.ts"
+}

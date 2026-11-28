@@ -37,8 +37,6 @@ import React, {
 } from "react";
 import {
   Blocks,
-  ChevronDown,
-  ChevronRight,
   Folder,
   House,
   Plus,
@@ -50,6 +48,7 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useNativeRuntime } from "../platform/runtime";
 import { useAuth } from "../features/auth";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
+import { newestUnreadChatInFolder } from "../features/agent/chat-unread";
 import { ComposerDraftIndicator } from "../features/agent/composer-draft-indicator";
 import {
   prefetchSettingsForRepo,
@@ -61,6 +60,9 @@ import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganizati
 import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-state";
 import { useSharingOwners, useSharingSections } from "../state/cloud-workspace-creators";
 import { pullRequestTarget } from "../state/workspace-repositories";
+import { sidebarGroupingId, sidebarProjectionArgs } from "./sidebar-projection";
+import { useSidebarStatusAnnouncement } from "./sidebar-status-announcer";
+import { sidebarRowStatus } from "./sidebar-workspace-row-meta";
 import { getPrIslandKind, usePrIslandKindsVersion } from "./pr/pr-island-state-store";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
@@ -95,7 +97,7 @@ import { useActiveWorkspace } from "../state/use-active-workspace";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { useOrganizationDestination } from "../state/organization-navigation";
 import {
-  setSidebarHiddenPlacements, setSidebarGroupCollapsed, setSidebarRepositoryIds, setSidebarStatusCollapsed, setSidebarWorkspaceSort,
+  setSidebarHiddenPlacements, setSidebarGroupCollapsed, setSidebarRepositoryIds, setSidebarWorkspaceSort,
   sidebarHiddenPlacements, sidebarRepositoryFilterOwner, sidebarRepositoryIds, useSidebarListPreferences,
 } from "../state/sidebar-list-preferences";
 import {
@@ -113,7 +115,6 @@ import {
 import { cn } from "../shared/ui/cn";
 import { ZerosSpinner } from "../shared/ui/loading";
 import { Button } from "../shared/ui/primitives/button";
-import { StatusIcon } from "../shared/ui/primitives/status-icon";
 import { toast } from "../shared/ui/primitives/elements";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import { useAddProject } from "./add-project-provider";
@@ -141,6 +142,7 @@ import {
 import {
   buildSidebarSharingSections,
   buildSidebarWorkspaceEntries,
+  sidebarSelectedProjectIds,
   rowsShownForPlacements,
   type SidebarWorkspaceEntry,
   sidebarItemSelectionKey,
@@ -151,16 +153,25 @@ import {
   type SidebarWorkspaceItem,
   type SidebarWorkspaceListFilter,
 } from "./sidebar-workspace-model";
-import { SidebarWorkspaceMenu } from "./sidebar-workspace-menu";
-import { useSidebarWorkspaceSignals } from "./use-sidebar-workspace-signals";
+import { SidebarWorkspaceMenu, type SidebarWorkspaceMenuGroups } from "./sidebar-workspace-menu";
+import { SidebarGroupHeader } from "./sidebar-group-header";
+import { useCloudErrorWorkspaceIds } from "./sidebar-cloud-mark";
+import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
+import { setupFailureShown, useSetupFailureAcknowledgements } from "../state/setup-failure-acknowledgements";
+import { sidebarChatIdsByWorkspace, useSidebarWorkspaceSignals } from "./use-sidebar-workspace-signals";
 import { SidebarArchivedSection } from "./sidebar-archived-section";
 import {
+  ARCHIVED_STATUS_GROUP,
   agentStatusOf,
   extraGroupOf,
+  orderSidebarGroups,
+  sidebarDefaultGroups,
+  pendingGroupOf,
+  type SidebarWorkspaceSignal,
   filterSidebarWorkspaces,
   sidebarViewFilters,
   workspacePullRequests,
-  PR_FILTER_LABELS,
+  observeSidebarSetupFailures,
   sidebarWorkspaceComparator,
 } from "./sidebar-view-model";
 import {
@@ -168,11 +179,11 @@ import {
   SIDEBAR_PR_FILTERS,
   setSidebarSectionCollapsed,
   type SidebarAgentStatusFilter,
+  type SidebarExtraGrouping,
+  type SidebarGroupingId,
   type SidebarOwnerFilter,
   type SidebarPrFilter,
-  type SidebarThenBy,
 } from "../state/sidebar-list-preferences";
-import { LIFECYCLE_STATUSES, statusMeta } from "../shared/lib/workspace-status";
 import { useSidebarWorkspaceActivity } from "./sidebar-workspace-activity";
 import {
   PendingSidebarWorkspaceRow,
@@ -203,14 +214,15 @@ import { initialsOf } from "@/renderer/shared/lib/initials";
 // width. `[&_svg]:` beats the primitive's own icon size through twMerge.
 const SIDEBAR_ENTRY_CLS =
   "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-fast ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-selected-bg data-[state=active]:text-fg1 data-[state=active]:hover:bg-selected-bg [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
-// The list's section label: 12/16 medium on fg3, like Settings' group labels.
-const SECTION_LABEL_CLS = "select-none truncate text-3xxs leading-4 font-medium text-fg3";
 // The sidebar never squeezes the workspace below its column floors
 // (conversation 360px + workbench 200px + seams); the persisted width is a
 // preference, this cap is the live window's constraint.
 const SIDEBAR_MAX_WIDTH_CLS = "max-w-[calc(100vw-580px)]";
 
 const EMPTY_WORKSPACE_CHAT_IDS: readonly string[] = Object.freeze([]);
+const ARCHIVED_GROUP_COLLAPSE_KEY = `group:${ARCHIVED_STATUS_GROUP.key}`;
+
+type SidebarWorkspaceEntryWithGroups = Extract<SidebarWorkspaceEntry, { kind: "group" | "repository" }>;
 
 // --- HELPERS ---
 
@@ -452,17 +464,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [allPendingCreates, accessibleWorkspaces],
   );
 
-  const chatIdsByWorkspace = useMemo(() => {
-    const liveChats = chats.filter((chat) => !chat.archived);
-    const ids = new Map<string, string[]>();
-    for (const workspace of realWorkspaces) ids.set(workspace.id, []);
-    for (const chat of liveChats) {
-      const workspace = findWorkspaceForFolder(chat.folder, realWorkspaces);
-      if (!workspace) continue;
-      ids.get(workspace.id)?.push(chat.id);
-    }
-    return ids;
-  }, [chats, realWorkspaces]);
+  const chatIdsByWorkspace = useMemo(() => sidebarChatIdsByWorkspace(chats, realWorkspaces), [chats, realWorkspaces]);
   const draftIdsByWorkspace = useMemo(
     () => draftChatIdsByWorkspace(chats, realWorkspaces),
     [chats, realWorkspaces],
@@ -485,7 +487,26 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   }), []);
   const view = preferences.view;
   const signalLookup = useSidebarWorkspaceSignals(chatIdsByWorkspace, draftIdsByWorkspace, !hidden);
-  const signalOfWorkspace = useCallback((workspace: Workspace) => signalLookup(workspace.id), [signalLookup]);
+  const setupAcknowledgements = useSetupFailureAcknowledgements();
+  const cloudErrorIds = useCloudErrorWorkspaceIds(realWorkspaces);
+  // The row's own status inputs, so Group and Filter › Status agree with it.
+  const signalOfWorkspace = useCallback((workspace: Workspace): SidebarWorkspaceSignal => ({
+    ...signalLookup(workspace.id),
+    setupFailed: setupFailureShown(workspace, setupAcknowledgements.has(workspace.id)),
+    cloudError: cloudErrorIds.has(workspace.id),
+  }), [cloudErrorIds, setupAcknowledgements, signalLookup]);
+  // "Setup failed" reports one event: once an agent starts working on the
+  // workspace or another status takes its place, it has been answered. Only a
+  // change seen after the failure counts, so a failure that lands while an
+  // agent is already busy still shows.
+  const seenSignalsRef = useRef(new Map<string, string>());
+  useEffect(() => {
+    observeSidebarSetupFailures({
+      workspaces: realWorkspaces,
+      seen: seenSignalsRef.current,
+      observing: hidden ? null : { signalOf: signalLookup, chatIdsOf: (id) => chatIdsByWorkspace.get(id) },
+    });
+  }, [chatIdsByWorkspace, hidden, realWorkspaces, signalLookup]);
   const ownerOf = useCallback(
     (workspace: Workspace): SidebarOwnerFilter | null => {
       if (!sharing) return "mine";
@@ -498,68 +519,84 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     void prIslandVersion;
     return (workspace: Workspace) => getPrIslandKind(pullRequestTarget(workspace), workspace.prNumber);
   }, [prIslandVersion]);
-  const viewArgs = useMemo(() => {
-    const label = (workspace: Workspace) => workspaceLabel(workspace);
-    const base = sidebarWorkspaceComparator({
-      sort: preferences.sort,
-      direction: view.direction,
-      needsYouFirst: view.needsYouFirst,
-      label,
-      activeAt: (workspace) => activeAtByWorkspaceId.get(workspace.id),
-      needsYou: (workspace) => signalLookup(workspace.id).awaiting !== null,
-    });
-    const groupOf = (grouping: SidebarThenBy, workspace: Workspace) =>
-      grouping === "repository"
-        ? { order: 0, key: workspace.repoSlug ?? "" }
-        : grouping === "status"
-          ? { order: LIFECYCLE_STATUSES.findIndex((status) => status.value === statusMeta(workspace.status).value), key: "" }
-          : extraGroupOf(grouping, workspace, { signal: signalLookup(workspace.id), activeAt: activeAtByWorkspaceId.get(workspace.id), owner: ownerOf(workspace), island: islandOf(workspace) });
-    const thenBy = view.thenBy;
-    const compare = thenBy
-      ? (a: Workspace, b: Workspace) => {
-          const ga = groupOf(thenBy, a);
-          const gb = groupOf(thenBy, b);
-          return ga.order - gb.order || ga.key.localeCompare(gb.key) || base(a, b);
-        }
-      : base;
-    const grouping = view.grouping;
-    return {
-      compare,
-      hideEmptyGroups: view.hideEmptyGroups,
-      ...(grouping
-        ? {
-            extraGroup: (item: SidebarWorkspaceItem) =>
-              item.kind === "pending"
-                ? grouping === "placement" && item.pending.placement === "cloud"
-                  ? { key: "cloud", label: "Cloud", order: 1 }
-                  : grouping === "placement"
-                    ? { key: "local", label: "This Mac", order: 0 }
-                    : grouping === "recency"
-                      ? { key: "today", label: "Today", order: 0 }
-                      : grouping === "pr"
-                        ? { key: "none", label: PR_FILTER_LABELS.none, order: 5 }
-                        : { key: "mine", label: "Mine", order: 0 }
-                : extraGroupOf(grouping, item.workspace, {
-                    signal: signalLookup(item.workspace.id),
-                    activeAt: activeAtByWorkspaceId.get(item.workspace.id),
-                    owner: ownerOf(item.workspace),
-                    island: islandOf(item.workspace),
-                  }),
-          }
-        : {}),
-    };
-  }, [activeAtByWorkspaceId, islandOf, ownerOf, preferences.sort, signalLookup, view.direction, view.grouping, view.hideEmptyGroups, view.needsYouFirst, view.thenBy]);
+  // What the list is grouped by: Repository (the persisted default), Status
+  // and the other View-menu groupings, or None.
+  const groupingId: SidebarGroupingId | null = sidebarGroupingId(view, listFilter);
+  const keepWorkspaceId = useMemo(
+    () => activePage === "workspace" && activeFolder ? (findWorkspaceForFolder(activeFolder, realWorkspaces)?.id ?? null) : null,
+    [activeFolder, activePage, realWorkspaces],
+  );
+  const viewArgs = useMemo(() => sidebarProjectionArgs({
+    view,
+    sort: preferences.sort,
+    groupingId,
+    projects,
+    unifiedPlacements,
+    signalOf: signalOfWorkspace,
+    activeAt: (workspace) => activeAtByWorkspaceId.get(workspace.id),
+    ownerOf,
+    islandOf,
+    keepWorkspaceId,
+  }), [activeAtByWorkspaceId, groupingId, islandOf, keepWorkspaceId, ownerOf, preferences.sort, projects, signalOfWorkspace, unifiedPlacements, view]);
   const menuCounts = useMemo(() => {
     const statuses = Object.fromEntries(SIDEBAR_AGENT_STATUS_FILTERS.map(status => [status, 0])) as Record<SidebarAgentStatusFilter, number>;
     const prStates = Object.fromEntries(SIDEBAR_PR_FILTERS.map(state => [state, 0])) as Record<SidebarPrFilter, number>;
     for (const workspace of rowsShownForPlacements(realWorkspaces, hiddenPlacements)) {
-      statuses[agentStatusOf(workspace, signalLookup(workspace.id))] += 1;
+      statuses[agentStatusOf(workspace, signalOfWorkspace(workspace))] += 1;
       const tones = new Set(workspacePullRequests(workspace, islandOf(workspace)).map(pull => pull.tone));
       if (tones.size === 0) prStates.none += 1;
       for (const tone of tones) prStates[tone] += 1;
     }
     return { statuses, prStates };
-  }, [hiddenPlacements, islandOf, realWorkspaces, signalLookup]);
+  }, [hiddenPlacements, islandOf, realWorkspaces, signalOfWorkspace]);
+  // The Group menu's list: the current grouping's groups, in painted order,
+  // counted over the workspaces the filters leave.
+  const menuGroups = useMemo((): SidebarWorkspaceMenuGroups | null => {
+    if (!groupingId) return null;
+    const hiddenKeys = view.hiddenGroups[groupingId] ?? [];
+    const order = view.groupOrder[groupingId];
+    // Count only what the list can show: the repository filter's scope too.
+    const selected = sidebarSelectedProjectIds(repositoryIds, unifiedPlacements ? projectGroupLookup(projects) : null);
+    const inScope = (workspace: Workspace) => {
+      if (selected.size === 0) return true;
+      const project = findProjectForFolder(workspace.repoRoot, projects);
+      return !!project && selected.has(project.id);
+    };
+    const shown = filterSidebarWorkspaces(rowsShownForPlacements(realWorkspaces, hiddenPlacements).filter(inScope), view, signalOfWorkspace, sharing ? ownerOf : undefined, islandOf);
+    const counts = new Map<string, number>();
+    const count = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (groupingId === "repository") {
+      const groupOf = unifiedPlacements ? projectGroupLookup(projects) : null;
+      const members = (project: Project) => groupOf?.(project.id) ?? [project];
+      const heads = projects.filter(project => project.isGitRepository !== false &&
+        (members(project)[0]?.id ?? project.id) === project.id &&
+        (repositoryIds.length === 0 || members(project).some(member => repositoryIds.includes(member.id))));
+      for (const workspace of shown) {
+        const project = findProjectForFolder(workspace.repoRoot, projects);
+        if (project) count(groupOf?.(project.id)?.[0]?.id ?? project.id);
+      }
+      return {
+        grouping: groupingId,
+        items: orderSidebarGroups(heads.map(project => ({ key: project.id, label: project.name, count: counts.get(project.id) ?? 0 })), item => item.key, order),
+        hidden: hiddenKeys,
+      };
+    }
+    for (const workspace of shown) {
+      count(extraGroupOf(groupingId, workspace, {
+        signal: signalOfWorkspace(workspace),
+        activeAt: activeAtByWorkspaceId.get(workspace.id),
+        owner: ownerOf(workspace),
+        island: islandOf(workspace),
+      }).key);
+    }
+    // Archived always paints after the live groups: it can be hidden, not moved.
+    const groups = sidebarDefaultGroups(groupingId);
+    const live = groups.filter(group => group.key !== ARCHIVED_STATUS_GROUP.key)
+      .map(group => ({ key: group.key, label: group.label, count: counts.get(group.key) ?? 0 }));
+    const pinned = groups.filter(group => group.key === ARCHIVED_STATUS_GROUP.key)
+      .map(group => ({ key: group.key, label: group.label, pinned: true }));
+    return { grouping: groupingId, items: [...orderSidebarGroups(live, item => item.key, order), ...pinned], hidden: hiddenKeys };
+  }, [activeAtByWorkspaceId, groupingId, hiddenPlacements, islandOf, ownerOf, projects, realWorkspaces, repositoryIds, sharing, signalOfWorkspace, unifiedPlacements, view]);
   const buildSections = useCallback((expanded: ReadonlySet<string>) => {
     const args = {
       expandedWorkspaceIds: expanded,
@@ -584,6 +621,26 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     () => listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
     [listedItems],
   );
+  // Parent rows carry their loader or dot inside the child toggle; one
+  // list-level region speaks their status changes (sidebar-status-announcer).
+  const parentIds = useMemo(
+    () => new Set(realWorkspaces.flatMap(workspace => workspace.parentWorkspaceId ? [workspace.parentWorkspaceId] : [])),
+    [realWorkspaces],
+  );
+  const announcedRows = useMemo(() => hidden ? null : navigableWorkspaces.flatMap(workspace => {
+    if (!parentIds.has(workspace.id)) return [];
+    const signal = signalOfWorkspace(workspace);
+    const status = sidebarRowStatus({
+      archiving: false,
+      setupFailed: !!signal.setupFailed,
+      cloudStatus: signal.cloudError ? "error" : null,
+      awaiting: signal.awaiting,
+      working: signal.working,
+      unread: signal.unread,
+    });
+    return [{ id: workspace.id, label: workspaceLabel(workspace), status: status?.label ?? null }];
+  }), [hidden, navigableWorkspaces, parentIds, signalOfWorkspace]);
+  const statusAnnouncement = useSidebarStatusAnnouncement(announcedRows);
   // Repository filtering also bounds Back/Forward destinations; collapse does
   // not remove a destination from history.
   // Child workspaces under a collapsed parent stay history destinations,
@@ -783,10 +840,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     (workspace: WorkspaceNavigationTarget) => {
       // Warm the workbench and the existing conversation together.
       prefetchWorkspaceSurface(workspace);
-      const chatId = selectChatToRestoreForFolder(
-        useWorkspaceStore.getState(),
-        workspace.path,
-      );
+      const state = useWorkspaceStore.getState();
+      const chatId =
+        newestUnreadChatInFolder(state.chats, workspace.path) ??
+        selectChatToRestoreForFolder(state, workspace.path);
       if (chatId) {
         void sessions.hydrateChat(chatId);
         prepareChatView(chatId);
@@ -823,6 +880,8 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
   const displayName = session?.user.name ?? null;
 
+  const archivedStatusGroup = groupingId === "status" &&
+    !(view.hiddenGroups.status ?? []).includes(ARCHIVED_STATUS_GROUP.key);
   const listFiltered = repositoryIds.length > 0 || hiddenPlacements.length > 0 || sidebarViewFilters(preferences.view);
   const workspaceMenu = hidden ? null : (
     <SidebarWorkspaceMenu
@@ -835,6 +894,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       repositoryIds={repositoryIds}
       sharing={sharing}
       counts={menuCounts}
+      groups={menuGroups}
       onGroupingChange={handleSelectFilter}
       onSortChange={setSidebarWorkspaceSort}
       onRepositoryIdsChange={ids => setSidebarRepositoryIds(filterOwner, ids)}
@@ -845,40 +905,65 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     />
   );
 
+  // A group's rows, or its sub-groups' headers and rows. A collapsed group or
+  // sub-group keeps the open workspace visible.
+  const renderGroupRows = (
+    groupId: string,
+    collapseKey: string,
+    items: readonly SidebarWorkspaceItem[],
+    subgroups: SidebarWorkspaceEntryWithGroups["subgroups"],
+    collapsed: boolean,
+    underRepository: boolean,
+  ) => {
+    if (!subgroups || collapsed) {
+      return visibleRepositoryItems(items, collapsed, activeSelectionKey).map(item => renderItem(item, true, underRepository));
+    }
+    return subgroups.map(subgroup => {
+      const subKey = `${collapseKey}/${subgroup.key}`;
+      const subCollapsed = view.collapsedGroups.includes(subKey);
+      const subId = `${groupId}-${subgroup.key.replace(/[^a-z0-9-]/gi, "-")}`;
+      return (
+        <React.Fragment key={subKey}>
+          <SidebarGroupHeader
+            level="subgroup"
+            label={subgroup.label}
+            count={subgroup.items.length}
+            icon={subgroup.project ? <RepositoryIcon project={subgroup.project} className={REPOSITORY_ICON_CHIP_CLS} /> : undefined}
+            expanded={!subCollapsed}
+            controls={subId}
+            onToggle={() => setSidebarGroupCollapsed(subKey, !subCollapsed)}
+            data-sidebar-subgroup={subKey}
+          />
+          <div id={subId} role="group" aria-label={`${subgroup.label} workspaces`} className="flex flex-col gap-0.5 empty:hidden">
+            {visibleRepositoryItems(subgroup.items, subCollapsed, activeSelectionKey)
+              .map(item => renderItem(item, true, underRepository || !!subgroup.project))}
+          </div>
+        </React.Fragment>
+      );
+    });
+  };
+
   const renderEntry = (entry: SidebarWorkspaceEntry, section: string | null) => {
     if (entry.kind === "row") {
       return renderItem(entry.item, false);
     }
-    if (entry.kind === "status" || entry.kind === "group") {
-      const status = entry.kind === "status" ? entry.status : null;
-      const groupKey = status ? `status:${status.value}` : entry.key;
-      const collapsed = status
-        ? preferences.collapsedStatuses.includes(status.value)
-        : view.collapsedGroups.includes(groupKey);
-      const label = entry.kind === "status" ? entry.status.label : entry.label;
-      const groupId = `sidebar-${section ? `${section}-` : ""}${status ? `status-${status.value}` : entry.key.replace(/[^a-z0-9-]/gi, "-")}`;
+    if (entry.kind === "group") {
+      const collapsed = entry.concealed || view.collapsedGroups.includes(entry.key);
+      const groupId = `sidebar-${section ? `${section}-` : ""}${entry.key.replace(/[^a-z0-9-]/gi, "-")}`;
       return (
         <React.Fragment key={entry.key}>
-          <Button type="button" variant="ghost"
-            className={cn(SIDEBAR_ENTRY_CLS, "font-medium")}
-            data-sidebar-status={status?.value}
-            data-sidebar-group={status ? undefined : entry.key}
-            aria-expanded={!collapsed} aria-controls={groupId}
-            onClick={() => status
-              ? setSidebarStatusCollapsed(status.value, !collapsed)
-              : setSidebarGroupCollapsed(groupKey, !collapsed)}>
-            {status && (
-              <span className="inline-flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
-                <StatusIcon status={status.value} className="size-3.5" />
-              </span>
-            )}
-            <span className="min-w-0 truncate">{label}</span>
-            <span className="text-fg3 ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
-            {collapsed ? <ChevronRight strokeWidth={1.5} aria-hidden="true" /> : <ChevronDown strokeWidth={1.5} aria-hidden="true" />}
-          </Button>
-          <div id={groupId} role="group" aria-label={`${label} workspaces`}
+          <SidebarGroupHeader
+            level="group"
+            label={entry.label}
+            count={entry.items.length}
+            expanded={!collapsed}
+            controls={groupId}
+            onToggle={() => setSidebarGroupCollapsed(entry.key, !collapsed)}
+            data-sidebar-group={entry.key}
+          />
+          <div id={groupId} role="group" aria-label={`${entry.label} workspaces`}
             className="flex flex-col gap-0.5 empty:hidden">
-            {visibleRepositoryItems(entry.items, collapsed, activeSelectionKey).map(item => renderItem(item, true))}
+            {renderGroupRows(groupId, entry.key, entry.items, entry.subgroups, collapsed, false)}
           </div>
         </React.Fragment>
       );
@@ -916,11 +1001,12 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       );
     }
     const groupId = `sidebar-${section ? `${section}-` : ""}repository-${entry.project.id}`;
-    const collapsed = collapsedRepositories.has(entry.project.id);
+    const collapsed = entry.concealed || collapsedRepositories.has(entry.project.id);
     return (
       <React.Fragment key={entry.key}>
         <SidebarRepositoryHeader
           project={entry.project}
+          count={entry.items.length}
           collapsed={collapsed}
           active={
             effectiveActivePage === "repo" &&
@@ -936,17 +1022,26 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           aria-label={`${entry.project.name} workspaces`}
           className="flex flex-col gap-0.5 empty:hidden"
         >
-          {visibleRepositoryItems(
-            entry.items,
-            collapsed,
-            activeSelectionKey,
-          ).map((item) => renderItem(item, true))}
+          {/* Section-scoped, like group keys: collapsing a sub-group in one section leaves the others. */}
+          {renderGroupRows(groupId, `${section ? `${section}:` : ""}repository:${entry.project.id}`, entry.items, entry.subgroups, collapsed, true)}
         </div>
       </React.Fragment>
     );
   };
 
-  const renderItem = (item: SidebarWorkspaceItem, grouped: boolean) => {
+  // Under a repository header the logo would only repeat the header, so the
+  // row's lead carries its loader or dot instead; a child from another
+  // repository than its parent keeps its logo to say where it lives.
+  const repositoryOf = (project: Project) => project.repoSlug ?? project.id;
+  const childOfAnotherRepository = (item: Extract<SidebarWorkspaceItem, { kind: "workspace" }>) => {
+    const parentId = item.workspace.parentWorkspaceId;
+    if (!parentId) return false;
+    const parent = realWorkspaces.find((workspace) => workspace.id === parentId);
+    const parentProject = parent ? findProjectForFolder(parent.repoRoot, projects) : null;
+    return !!parentProject && repositoryOf(parentProject) !== repositoryOf(item.project);
+  };
+
+  const renderItem = (item: SidebarWorkspaceItem, grouped: boolean, underRepository = false) => {
     const selectionKey = sidebarItemSelectionKey(item);
     const active = activeSelectionKey === selectionKey;
     return item.kind === "workspace" ? nestedWorkspaceRow(item, (
@@ -969,6 +1064,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         showProjectName={preferences.view.showProjectName && !preferences.view.compact}
         depth={item.depth}
         sameProjectAsParent={item.sameProjectAsParent}
+        repositoryLead={underRepository && !childOfAnotherRepository(item)}
         childCount={item.childCount}
         childrenExpanded={item.expanded}
         onToggleChildren={item.childCount ? () => toggleChildWorkspaces(item.workspace.id) : undefined}
@@ -1120,6 +1216,9 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           aria-hidden="true"
         />
 
+        <div className="sr-only" role="status" aria-live="polite" data-sidebar-status-announcer="">
+          {statusAnnouncement}
+        </div>
         <div
           ref={listRef}
           className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"
@@ -1141,34 +1240,43 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               const sectionId = `sidebar-section-${id}`;
               return (
                 <React.Fragment key={id}>
-                  <div className="group/section flex h-8 shrink-0 items-center gap-1 pt-1 first:pt-0" data-sidebar-section={id}>
-                    <Button type="button" variant="ghost"
-                      className="hover:bg-transparent h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-md border-0 px-2 font-normal [&_svg]:size-3 [&_svg]:text-fg3"
-                      aria-expanded={!collapsed} aria-controls={sectionId}
-                      onClick={() => setSidebarSectionCollapsed(id, !collapsed)}>
-                      <span className={cn(SECTION_LABEL_CLS, "min-w-0")}>{section.id === null ? "My workspaces" : section.label}</span>
-                      <span className="text-fg3 text-3xxs tabular-nums">{items.length}</span>
-                      <span className="ml-auto inline-flex shrink-0" aria-hidden="true">
-                        {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
-                      </span>
-                    </Button>
-                    {id === "mine" && workspaceMenu}
-                  </div>
+                  <SidebarGroupHeader
+                    level="section"
+                    label={section.id === null ? "My workspaces" : section.label}
+                    count={items.length}
+                    expanded={!collapsed}
+                    controls={sectionId}
+                    onToggle={() => setSidebarSectionCollapsed(id, !collapsed)}
+                    actions={id === "mine" ? workspaceMenu : undefined}
+                    className={id === "mine" ? undefined : "mt-1"}
+                    data-sidebar-section={id}
+                  />
                   <div id={sectionId} role="group" aria-label={section.id === null ? "My workspaces" : section.label} className="flex flex-col gap-0.5 empty:hidden">
                     {collapsed
                       ? items.filter(item => sidebarItemSelectionKey(item) === activeSelectionKey).map(item => renderItem(item, false))
                       : section.entries.map((entry) => renderEntry(entry, section.id))}
+                    {/* Group › Status ends My workspaces with an Archived
+                        group, shown until the Group menu hides it. */}
+                    {id === "mine" && !collapsed && !hidden && archivedStatusGroup && (
+                      <SidebarArchivedSection
+                        variant="group"
+                        organization={activeOrganization}
+                        collapsed={view.collapsedGroups.includes(ARCHIVED_GROUP_COLLAPSE_KEY)}
+                        compact={preferences.view.compact}
+                        onToggle={(collapsed) => setSidebarGroupCollapsed(ARCHIVED_GROUP_COLLAPSE_KEY, collapsed)}
+                      />
+                    )}
                   </div>
                 </React.Fragment>
               );
             })}
-            {preferences.view.showArchived && !hidden && (
+            {preferences.view.showArchived && !hidden && groupingId !== "status" && (
               <SidebarArchivedSection
+                variant="section"
                 organization={activeOrganization}
                 collapsed={preferences.view.collapsedSections.includes("archived")}
                 compact={preferences.view.compact}
                 onToggle={(collapsed) => setSidebarSectionCollapsed("archived", collapsed)}
-                labelClassName={SECTION_LABEL_CLS}
               />
             )}
             {pendingOnly && (

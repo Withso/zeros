@@ -14,9 +14,11 @@
   height: 12px;
   transform: scale(var(--design-canvas-inverse-zoom));
   transform-origin: top left;
-  border: 2px solid var(--design-selection-stroke);
+  /* A 12px hit target around an 8px visible dot. */
+  border: 2px solid transparent;
   border-radius: 50%;
-  background: var(--bg1);
+  background: var(--design-selection-handle-fill) padding-box;
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
   cursor: nwse-resize;
   pointer-events: auto;
   /* Above the selection's spacing zones inside the transformed canvas. */
@@ -905,6 +907,15 @@
   content: "";
 }
 
+/* Frame presets open beside the Frame tool, outside the rail's flow, so the
+ * toolbar never shifts. */
+.zd-design-frame-presets {
+  position: absolute;
+  top: 30px;
+  left: calc(100% + 8px);
+  white-space: nowrap;
+}
+
 .zd-design-tools-rail[data-motion-open] {
   bottom: calc(var(--zeros-design-motion-height, 240px) + 16px);
 }
@@ -1196,7 +1207,6 @@
 [data-design-frame-component][data-design-frame-root-selected] {
   --design-selection-stroke: var(--violet-text);
   --design-selection-soft: var(--violet-bg);
-  --design-selection-handle-fill: var(--violet-bg);
   --design-selection-label-bg: var(--violet-bg);
   --design-selection-label-fg: var(--violet-on-bg);
 }
@@ -2245,4 +2255,62 @@
   top: calc(100% + 2px * var(--design-canvas-inverse-zoom));
   width: 8px;
   height: 8px;
+}
+
+/* The Style inspector is the dense column: 24px controls, 12px values and a
+ * 32px section header, so more of a layer's properties fit without scrolling.
+ * Popovers, Motion and Theme keep the standard 28px geometry. */
+[data-design-inspector] .zd-field {
+  height: 24px;
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-field-label svg {
+  width: 12px;
+  height: 12px;
+}
+
+[data-design-inspector] .zd-segmented {
+  height: 24px;
+}
+
+[data-design-inspector] .zd-segment {
+  height: 20px;
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-segment svg {
+  width: 12px;
+  height: 12px;
+}
+
+[data-design-inspector] .zd-icon-button[data-size="row"] {
+  width: 24px;
+  height: 24px;
+}
+
+[data-design-inspector] .zd-icon-button[data-size="row"] svg {
+  width: 12px;
+  height: 12px;
+}
+
+[data-design-inspector] .zd-section-header {
+  height: 32px;
+}
+
+[data-design-inspector] .zd-section-title {
+  font-size: 12px;
+}
+
+[data-design-inspector] .zd-section-body {
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+[data-design-inspector] .zd-group {
+  gap: 4px;
+}
+
+[data-design-inspector] .zd-size-trigger {
+  top: 2px;
 }

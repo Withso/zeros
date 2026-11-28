@@ -875,7 +875,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent-bg-hover",
           "utilitySection": "utilities-local-links",
-          "utilityOrder": 104
+          "utilityOrder": 105
         }
       }
     },
@@ -892,7 +892,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-green-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 105
+          "utilityOrder": 106
         }
       }
     },
@@ -906,7 +906,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-green-solid-fg",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 107
+          "utilityOrder": 108
         }
       }
     },
@@ -923,7 +923,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 108
+          "utilityOrder": 109
         }
       }
     },
@@ -937,7 +937,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent-solid-fg",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 110
+          "utilityOrder": 111
         }
       }
     },
@@ -954,7 +954,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-neutral-solid",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 111
+          "utilityOrder": 112
         }
       }
     },
@@ -968,7 +968,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-neutral-solid-fg",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 113
+          "utilityOrder": 114
         }
       }
     },
@@ -1046,7 +1046,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-conflict-neutral",
           "utilitySection": "utilities-green-solid",
-          "utilityOrder": 114
+          "utilityOrder": 115
         }
       }
     },
@@ -1064,6 +1064,23 @@
           "utility": "--color-violet-text",
           "utilitySection": "utilities-red-text",
           "utilityOrder": 42
+        }
+      }
+    },
+    "orange-text": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [25.78, 69.565, 63.922]
+      },
+      "$description": "orange status words and dots for work waiting on the user (needs input, plan ready) on any plain surface",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--orange-text",
+          "section": "base-yellow-wash",
+          "utility": "--color-orange-text",
+          "utilitySection": "utilities-red-text",
+          "utilityOrder": 45
         }
       }
     },
@@ -1114,7 +1131,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent",
           "utilitySection": "utilities-red-text",
-          "utilityOrder": 45
+          "utilityOrder": 46
         }
       }
     },
@@ -1131,7 +1148,7 @@
           "section": "base-yellow-wash",
           "utility": "--color-accent-fg",
           "utilitySection": "utilities-red-text",
-          "utilityOrder": 46
+          "utilityOrder": 47
         }
       }
     },
@@ -1187,7 +1204,7 @@
           "section": "base-red-50",
           "utility": "--color-red-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 47
+          "utilityOrder": 48
         }
       }
     },
@@ -1204,7 +1221,7 @@
           "section": "base-red-50",
           "utility": "--color-red-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 48
+          "utilityOrder": 49
         }
       }
     },
@@ -1221,7 +1238,7 @@
           "section": "base-red-50",
           "utility": "--color-red-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 49
+          "utilityOrder": 50
         }
       }
     },
@@ -1238,7 +1255,7 @@
           "section": "base-red-50",
           "utility": "--color-red-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 50
+          "utilityOrder": 51
         }
       }
     },
@@ -1255,7 +1272,7 @@
           "section": "base-red-50",
           "utility": "--color-red-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 51
+          "utilityOrder": 52
         }
       }
     },
@@ -1272,7 +1289,7 @@
           "section": "base-red-50",
           "utility": "--color-red-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 52
+          "utilityOrder": 53
         }
       }
     },
@@ -1289,7 +1306,7 @@
           "section": "base-red-50",
           "utility": "--color-red-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 53
+          "utilityOrder": 54
         }
       }
     },
@@ -1306,7 +1323,7 @@
           "section": "base-red-50",
           "utility": "--color-red-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 54
+          "utilityOrder": 55
         }
       }
     },
@@ -1323,7 +1340,7 @@
           "section": "base-red-50",
           "utility": "--color-red-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 55,
+          "utilityOrder": 56,
           "cssFormat": "multiline"
         }
       }
@@ -1341,7 +1358,7 @@
           "section": "base-red-50",
           "utility": "--color-red-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 56
+          "utilityOrder": 57
         }
       }
     },
@@ -1358,7 +1375,7 @@
           "section": "base-red-50",
           "utility": "--color-red-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 57
+          "utilityOrder": 58
         }
       }
     },
@@ -1375,7 +1392,7 @@
           "section": "base-red-50",
           "utility": "--color-red-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 58
+          "utilityOrder": 59
         }
       }
     },
@@ -1392,7 +1409,7 @@
           "section": "base-red-50",
           "utility": "--color-green-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 59
+          "utilityOrder": 60
         }
       }
     },
@@ -1409,7 +1426,7 @@
           "section": "base-red-50",
           "utility": "--color-green-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 60
+          "utilityOrder": 61
         }
       }
     },
@@ -1426,7 +1443,7 @@
           "section": "base-red-50",
           "utility": "--color-green-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 61
+          "utilityOrder": 62
         }
       }
     },
@@ -1443,7 +1460,7 @@
           "section": "base-red-50",
           "utility": "--color-green-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 62
+          "utilityOrder": 63
         }
       }
     },
@@ -1460,7 +1477,7 @@
           "section": "base-red-50",
           "utility": "--color-green-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 63
+          "utilityOrder": 64
         }
       }
     },
@@ -1477,7 +1494,7 @@
           "section": "base-red-50",
           "utility": "--color-green-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 64
+          "utilityOrder": 65
         }
       }
     },
@@ -1494,7 +1511,7 @@
           "section": "base-red-50",
           "utility": "--color-green-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 65
+          "utilityOrder": 66
         }
       }
     },
@@ -1511,7 +1528,7 @@
           "section": "base-red-50",
           "utility": "--color-green-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 66
+          "utilityOrder": 67
         }
       }
     },
@@ -1528,7 +1545,7 @@
           "section": "base-red-50",
           "utility": "--color-green-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 67
+          "utilityOrder": 68
         }
       }
     },
@@ -1545,7 +1562,7 @@
           "section": "base-red-50",
           "utility": "--color-green-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 68
+          "utilityOrder": 69
         }
       }
     },
@@ -1562,7 +1579,7 @@
           "section": "base-red-50",
           "utility": "--color-green-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 69
+          "utilityOrder": 70
         }
       }
     },
@@ -1579,7 +1596,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 70
+          "utilityOrder": 71
         }
       }
     },
@@ -1596,7 +1613,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 71
+          "utilityOrder": 72
         }
       }
     },
@@ -1613,7 +1630,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 72
+          "utilityOrder": 73
         }
       }
     },
@@ -1630,7 +1647,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 73
+          "utilityOrder": 74
         }
       }
     },
@@ -1647,7 +1664,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 74
+          "utilityOrder": 75
         }
       }
     },
@@ -1664,7 +1681,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 75
+          "utilityOrder": 76
         }
       }
     },
@@ -1681,7 +1698,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 76
+          "utilityOrder": 77
         }
       }
     },
@@ -1698,7 +1715,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 77
+          "utilityOrder": 78
         }
       }
     },
@@ -1715,7 +1732,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 78
+          "utilityOrder": 79
         }
       }
     },
@@ -1732,7 +1749,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 79
+          "utilityOrder": 80
         }
       }
     },
@@ -1749,7 +1766,7 @@
           "section": "base-red-50",
           "utility": "--color-yellow-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 80
+          "utilityOrder": 81
         }
       }
     },
@@ -1766,7 +1783,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 81
+          "utilityOrder": 82
         }
       }
     },
@@ -1783,7 +1800,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 82
+          "utilityOrder": 83
         }
       }
     },
@@ -1800,7 +1817,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 83
+          "utilityOrder": 84
         }
       }
     },
@@ -1817,7 +1834,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 84
+          "utilityOrder": 85
         }
       }
     },
@@ -1834,7 +1851,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 85
+          "utilityOrder": 86
         }
       }
     },
@@ -1851,7 +1868,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 86
+          "utilityOrder": 87
         }
       }
     },
@@ -1868,7 +1885,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 87
+          "utilityOrder": 88
         }
       }
     },
@@ -1885,7 +1902,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 88
+          "utilityOrder": 89
         }
       }
     },
@@ -1902,7 +1919,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 89
+          "utilityOrder": 90
         }
       }
     },
@@ -1919,7 +1936,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 90
+          "utilityOrder": 91
         }
       }
     },
@@ -1936,7 +1953,7 @@
           "section": "base-red-50",
           "utility": "--color-blue-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 91
+          "utilityOrder": 92
         }
       }
     },
@@ -1953,7 +1970,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-50",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 92
+          "utilityOrder": 93
         }
       }
     },
@@ -1970,7 +1987,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-100",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 93
+          "utilityOrder": 94
         }
       }
     },
@@ -1987,7 +2004,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-200",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 94
+          "utilityOrder": 95
         }
       }
     },
@@ -2004,7 +2021,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-300",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 95
+          "utilityOrder": 96
         }
       }
     },
@@ -2021,7 +2038,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-400",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 96
+          "utilityOrder": 97
         }
       }
     },
@@ -2038,7 +2055,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-500",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 97
+          "utilityOrder": 98
         }
       }
     },
@@ -2055,7 +2072,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-600",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 98
+          "utilityOrder": 99
         }
       }
     },
@@ -2072,7 +2089,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-700",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 99
+          "utilityOrder": 100
         }
       }
     },
@@ -2089,7 +2106,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-750",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 100,
+          "utilityOrder": 101,
           "cssFormat": "multiline"
         }
       }
@@ -2107,7 +2124,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-800",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 101
+          "utilityOrder": 102
         }
       }
     },
@@ -2124,7 +2141,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-900",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 102
+          "utilityOrder": 103
         }
       }
     },
@@ -2141,7 +2158,7 @@
           "section": "base-red-50",
           "utility": "--color-violet-950",
           "utilitySection": "utilities-red-50",
-          "utilityOrder": 103
+          "utilityOrder": 104
         }
       }
     }

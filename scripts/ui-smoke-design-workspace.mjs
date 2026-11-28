@@ -1499,7 +1499,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     !!appliedInspectorVisual &&
       appliedInspectorVisual.background !== "rgba(0, 0, 0, 0)" &&
       appliedInspectorVisual.borderWidth === "0px" &&
-      appliedInspectorVisual.fontSize === "13px" &&
+      appliedInspectorVisual.fontSize === "12px" &&
       !appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
   );
   const untouchedPaddingTop = page.locator(
@@ -1584,7 +1584,12 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     ),
   );
   await untouchedPaddingInput.fill("12");
+  // Escape in a popover field reverts it and closes that popover.
   await page.keyboard.press("Escape");
+  await expect(untouchedPaddingTop).toHaveCount(0);
+  await inspector
+    .getByRole("button", { name: "Type settings", exact: true })
+    .click();
   check(
     "Escape restores the computed value without authoring a style",
     await waitFor(
@@ -3314,7 +3319,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     doneWrites === 1,
     `writes=${doneWrites}`,
   );
-  await page.keyboard.press("Escape");
+  // The outside click already closed the popover; Escape now would select the
+  // heading's parent, as it does on the canvas.
 
   await page.getByRole("button", { name: "Edit fill" }).click();
   const fillInput = page.getByRole("textbox", { name: "Fill value" });
