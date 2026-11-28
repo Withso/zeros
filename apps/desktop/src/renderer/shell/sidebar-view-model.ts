@@ -13,6 +13,7 @@ import type {
 } from "../state/sidebar-list-preferences";
 import { SIDEBAR_VIEW_DEFAULTS } from "../state/sidebar-list-preferences";
 import { workspacePrTone } from "./workspace-glyph";
+import { reconcileSetupFailureAcknowledgements } from "../state/setup-failure-acknowledgements";
 
 /** What the sidebar knows about a workspace's chats, read once for the list. */
 export interface SidebarWorkspaceSignal {
@@ -44,6 +45,35 @@ export function sidebarSignalMovedOn(previous: string, signal: SidebarWorkspaceS
   return (signal.working && working !== "1") ||
     (signal.awaiting !== null && awaiting !== signal.awaiting) ||
     (signal.unread && unread !== "1");
+}
+
+/** One sidebar pass over setup failures. Setup leaving "failed" retires an
+ *  acknowledgement whether or not the sidebar is shown, since setup can rerun
+ *  from the Setup tab while it is collapsed. Chat signals answer a failure only
+ *  while the sidebar observes them (`observing`), and only for a change seen
+ *  across two passes: `seen` holds the last pass and starts fresh after a
+ *  hidden one, so a failure that lands while an agent is busy still shows. */
+export function observeSidebarSetupFailures(args: {
+  workspaces: readonly { id: string; setupState?: string | null }[];
+  seen: Map<string, string>;
+  observing: {
+    signalOf: (workspaceId: string) => SidebarWorkspaceSignal;
+    chatIdsOf: (workspaceId: string) => readonly string[] | undefined;
+  } | null;
+}): void {
+  const { workspaces, seen, observing } = args;
+  reconcileSetupFailureAcknowledgements(workspaces, (id) => {
+    const previous = seen.get(id);
+    return !!observing && previous !== undefined &&
+      sidebarSignalMovedOn(previous, observing.signalOf(id), observing.chatIdsOf(id));
+  });
+  seen.clear();
+  if (!observing) return;
+  for (const workspace of workspaces) {
+    if (workspace.setupState === "failed") {
+      seen.set(workspace.id, sidebarSignalKey(observing.signalOf(workspace.id), observing.chatIdsOf(workspace.id)));
+    }
+  }
 }
 
 /** Group › Status and Filter › Status, in the row's own priority

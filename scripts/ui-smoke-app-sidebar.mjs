@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { closeSidebarMenu, openSidebarSubmenu, selectSidebarGrouping } from "./ui-smoke/sidebar-menu.mjs";
+import { closeSidebarMenu, openSidebarSubmenu, selectSidebarGrouping, sidebarMenuTrigger } from "./ui-smoke/sidebar-menu.mjs";
 import { runSidebarWorkspaceFilters } from "./ui-smoke-sidebar-filters.mjs";
 import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.mjs";
 import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
@@ -109,6 +109,21 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
     "Hover fills the repository header and reveals settings, ⋯ and + before the arrow; the logo stays",
     true,
   );
+
+  // The arrow is drawn over the full-row toggle; a click on the arrow itself
+  // reaches the toggle (the arrow and its wrapper are pointer-transparent).
+  const clickCenter = async (locator) => {
+    const box = await locator.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  };
+  const zerosArrowToggle = zeros.getByRole("button", { name: /^Zeros, \d+$/ });
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "true");
+  await clickCenter(zeros.locator("[data-sidebar-header-arrow]"));
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "false");
+  await clickCenter(zeros.locator("[data-sidebar-header-arrow]"));
+  await expect(zerosArrowToggle).toHaveAttribute("aria-expanded", "true");
+  await moveAway();
+  check("Clicking a repository header's arrow collapses and expands it", true);
 
   await zeros.hover();
   await more.click();
@@ -461,6 +476,46 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await section.hover();
   await expect(section).not.toHaveCSS("background-color", restingSection);
   check("My workspaces fills on hover and keeps its filter icon, without a dot, before the arrow", true);
+  const sectionToggle = section.locator(":scope > button").first();
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "true");
+  await clickCenter(section.locator("[data-sidebar-header-arrow]"));
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "false");
+  await clickCenter(section.locator("[data-sidebar-header-arrow]"));
+  await expect(sectionToggle).toHaveAttribute("aria-expanded", "true");
+  await moveAway();
+  check("Clicking a section header's arrow collapses and expands it", true);
+
+  // Compact puts PR controls at the row's end. Hover's Archive must sit past
+  // them: a running row under its repository header carries its loader in the
+  // lead, so nothing else stands between its PR control and the edge.
+  await page.evaluate(() => window.appSidebarUpdateWorkspace("ws-boston", {
+    prNumber: 42, prState: "ready", prUrl: "https://github.com/example/zeros/pull/42",
+  }));
+  await moveAway();
+  await sidebarMenuTrigger(page).click();
+  const compactSwitch = page.getByRole("menuitemcheckbox", { name: /^Compact view/ });
+  await compactSwitch.click();
+  await expect(compactSwitch).toHaveAttribute("aria-checked", "true");
+  await closeSidebarMenu(page);
+  const bostonRow = row("ws-boston");
+  const prControl = bostonRow.locator("[data-pr-mark]").first();
+  await expect(prControl).toBeVisible();
+  await bostonRow.hover();
+  const archiveControl = bostonRow.getByRole("button", { name: /^Archive workspace/ });
+  await expect(archiveControl).toBeVisible();
+  const [prBox, archiveBox] = await Promise.all([prControl.boundingBox(), archiveControl.boundingBox()]);
+  expect(prBox.x + prBox.width).toBeLessThanOrEqual(archiveBox.x);
+  expect(await prControl.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return node === top || node.contains(top);
+  })).toBe(true);
+  await moveAway();
+  await sidebarMenuTrigger(page).click();
+  await compactSwitch.click();
+  await expect(compactSwitch).toHaveAttribute("aria-checked", "false");
+  await closeSidebarMenu(page);
+  check("In Compact, hover's Archive sits past the PR control, which keeps its own clicks", true);
 
   // Collapse: the panel-left toggle hides the sidebar, then floats over the
   // content's corner at the same position; Home's title row sits beside it on

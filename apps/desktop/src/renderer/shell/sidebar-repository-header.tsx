@@ -184,7 +184,9 @@ export function SidebarRepositoryHeader({
             </span>
             {/* Settings, ⋯ and + appear before the arrow on a fade of the
                 row's fill, so hovering never re-truncates the name. */}
-            <div className="relative flex shrink-0 items-center">
+            {/* Pointer-transparent over the full-row toggle, so a click on the
+                arrow toggles; the hover actions opt their buttons back in. */}
+            <div className="pointer-events-none relative flex shrink-0 items-center">
               <div
                 className={cn(
                   REPOSITORY_HOVER_ACTIONS_CLS,

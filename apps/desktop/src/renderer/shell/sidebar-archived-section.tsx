@@ -42,6 +42,9 @@ export function SidebarArchivedSection({
       .slice(0, ARCHIVED_LIMIT),
     [organization, workspaces],
   );
+  // Group › Status drops empty groups; Archived is one of them. The section
+  // stays, since the user turned View › Show archived on to see it.
+  if (variant === "group" && resolved && rows.length === 0) return null;
   const now = Date.now();
   const listId = variant === "section" ? "sidebar-section-archived" : "sidebar-group-archived";
   return (

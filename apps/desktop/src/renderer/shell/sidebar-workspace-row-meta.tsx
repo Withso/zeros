@@ -27,6 +27,7 @@ import {
   type PrMarkTone,
   type SidebarPullRequest,
 } from "./sidebar-view-model";
+import "./sidebar-workspace-status.css";
 
 const PR_TONE_CLS: Record<PrMarkTone, string> = {
   draft: "text-fg3",
@@ -125,8 +126,12 @@ export function sidebarRowStatus(args: {
   unread: boolean;
 }): SidebarRowStatus | null {
   if (args.archiving) return { label: "Archiving", tone: "muted" };
+  // The cloud catalog maps a machine error to a failed setup, so a cloud
+  // error names itself first; only its own setup_failed is a setup failure.
+  const cloudError = !!args.cloudStatus && CLOUD_ERROR.has(args.cloudStatus);
+  if (cloudError && args.cloudStatus !== "setup_failed") return { label: "Cloud error", tone: "failed" };
   if (args.setupFailed) return { label: "Setup failed", tone: "failed" };
-  if (args.cloudStatus && CLOUD_ERROR.has(args.cloudStatus)) return { label: "Cloud error", tone: "failed" };
+  if (cloudError) return { label: "Cloud error", tone: "failed" };
   if (args.awaiting === "input") return { label: "Needs input", tone: "attention" };
   if (args.awaiting === "plan") return { label: "Plan ready", tone: "attention" };
   if (args.working) return { label: "Working", tone: "working" };

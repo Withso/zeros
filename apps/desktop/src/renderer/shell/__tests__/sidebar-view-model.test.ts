@@ -152,6 +152,15 @@ describe("sidebar row status", () => {
     expect(sidebarRowStatus({ ...base, cloudStatus: "starting" })).toEqual({ label: "Waking", tone: "muted" });
     expect(sidebarRowStatus({ ...base, cloudStatus: "unhealthy", awaiting: "plan" })).toEqual({ label: "Cloud error", tone: "failed" });
   });
+  // The cloud catalog reports a machine error as a failed setup; the row says
+  // what actually broke. A cloud setup_failed is a real setup failure.
+  it("names a cloud machine error, not a setup failure", () => {
+    for (const cloudStatus of ["error", "failed", "unhealthy"]) {
+      expect(sidebarRowStatus({ ...base, setupFailed: true, cloudStatus })).toEqual({ label: "Cloud error", tone: "failed" });
+    }
+    expect(sidebarRowStatus({ ...base, setupFailed: true, cloudStatus: "setup_failed" })).toEqual({ label: "Setup failed", tone: "failed" });
+    expect(sidebarRowStatus({ ...base, setupFailed: true, cloudStatus: "ready" })).toEqual({ label: "Setup failed", tone: "failed" });
+  });
 });
 
 describe("applied view options", () => {

@@ -76,8 +76,10 @@ export function SidebarGroupHeader({
         <span className="min-w-0 truncate">{label}</span>
         {count != null && <span className="text-fg3 shrink-0 font-normal tabular-nums">{count}</span>}
       </span>
-      <span className="relative flex shrink-0 items-center gap-0.5">
-        {actions}
+      {/* Pointer-transparent over the full-row toggle, so a click on the arrow
+          (or the gaps) toggles; only the actions take their own clicks. */}
+      <span className="pointer-events-none relative flex shrink-0 items-center gap-0.5">
+        {actions && <span className="pointer-events-auto contents">{actions}</span>}
         <span className="text-fg3 pointer-events-none inline-flex size-6 items-center justify-center" aria-hidden="true" data-sidebar-header-arrow>
           {expanded ? <ChevronDown className="size-3.5" strokeWidth={1.5} /> : <ChevronRight className="size-3.5" strokeWidth={1.5} />}
         </span>

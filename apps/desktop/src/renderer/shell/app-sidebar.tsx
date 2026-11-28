@@ -70,7 +70,6 @@ import {
   useLiveVisible,
 } from "../state/live-workspace-selectors";
 import { isLocalMainWorkspace } from "../state/local-main-workspace";
-import { reconcileSetupFailureAcknowledgements } from "../state/setup-failure-acknowledgements";
 import {
   usePendingCreatesAll,
   useWorkspaceProvisioning,
@@ -168,8 +167,7 @@ import {
   filterSidebarWorkspaces,
   sidebarViewFilters,
   workspacePullRequests,
-  sidebarSignalKey,
-  sidebarSignalMovedOn,
+  observeSidebarSetupFailures,
   sidebarWorkspaceComparator,
 } from "./sidebar-view-model";
 import {
@@ -509,19 +507,11 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   // agent is already busy still shows.
   const seenSignalsRef = useRef(new Map<string, string>());
   useEffect(() => {
-    if (hidden) return;
-    const seen = seenSignalsRef.current;
-    reconcileSetupFailureAcknowledgements(realWorkspaces, (id) => {
-      const signal = signalLookup(id);
-      const previous = seen.get(id);
-      return previous !== undefined && sidebarSignalMovedOn(previous, signal, chatIdsByWorkspace.get(id));
+    observeSidebarSetupFailures({
+      workspaces: realWorkspaces,
+      seen: seenSignalsRef.current,
+      observing: hidden ? null : { signalOf: signalLookup, chatIdsOf: (id) => chatIdsByWorkspace.get(id) },
     });
-    seen.clear();
-    for (const workspace of realWorkspaces) {
-      if (workspace.setupState === "failed") {
-        seen.set(workspace.id, sidebarSignalKey(signalLookup(workspace.id), chatIdsByWorkspace.get(workspace.id)));
-      }
-    }
   }, [chatIdsByWorkspace, hidden, realWorkspaces, signalLookup]);
   const ownerOf = useCallback(
     (workspace: Workspace): SidebarOwnerFilter | null => {

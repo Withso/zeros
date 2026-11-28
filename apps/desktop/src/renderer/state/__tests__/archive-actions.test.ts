@@ -12,7 +12,7 @@ import {
 } from "../pending-workspaces";
 import { selectActiveFolder, useWorkspaceStore } from "../store";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
-import { setSidebarRepositoryIds, setSidebarWorkspaceSort } from "../sidebar-list-preferences";
+import { setSidebarGroupHidden, setSidebarGroupOrder, setSidebarRepositoryIds, setSidebarWorkspaceSort } from "../sidebar-list-preferences";
 import {
   workspaceArchive,
   workspaceDelete,
@@ -161,6 +161,36 @@ describe("sidebar archive presentation", () => {
       expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(other.path);
       expect(peekWorkspacesFor("other")).toEqual([other]);
     } finally { setWorkspaceRowsForTesting("other", []); }
+  });
+
+  // A repository hidden from the Group menu is out of the sidebar, so removal
+  // never lands in it, with or without a visible survivor.
+  it.each([true, false])("never repoints into a hidden repository (visible survivor: %s)", async visibleSurvivor => {
+    const hiddenRow = { ...right, id: "hidden", repoRoot: "/hidden", repoSlug: "hidden", path: "/hidden/workspace" };
+    const shownRow = { ...right, id: "shown", repoRoot: "/shown", repoSlug: "shown", path: "/shown/workspace" };
+    vi.mocked(loadProjects).mockReturnValue([
+      ...loadProjects(),
+      { id: "hidden-project", name: "Hidden", repoRoot: "/hidden", repoSlug: "hidden", originUrl: null, addedAt: 2 },
+      { id: "shown-project", name: "Shown", repoRoot: "/shown", repoSlug: "shown", originUrl: null, addedAt: 3 },
+    ]);
+    useWorkspaceStore.setState({ workspaceListFilter: "grouped" });
+    setWorkspaceRowsForTesting(target.repoSlug, [target]);
+    setWorkspaceRowsForTesting("hidden", [hiddenRow]);
+    setWorkspaceRowsForTesting("shown", visibleSurvivor ? [shownRow] : []);
+    setSidebarGroupOrder("repository", ["archive-fixture", "hidden-project", "shown-project"]);
+    setSidebarGroupHidden("repository", "hidden-project", true);
+    vi.mocked(workspaceArchive).mockResolvedValue(result());
+    try {
+      await archiveWorkspaceWithFeedback(target, dispatch);
+      const active = selectActiveFolder(useWorkspaceStore.getState());
+      expect(active).not.toBe(hiddenRow.path);
+      if (visibleSurvivor) expect(active).toBe(shownRow.path);
+    } finally {
+      setWorkspaceRowsForTesting("hidden", []);
+      setWorkspaceRowsForTesting("shown", []);
+      setSidebarGroupHidden("repository", "hidden-project", false);
+      setSidebarGroupOrder("repository", []);
+    }
   });
 });
 

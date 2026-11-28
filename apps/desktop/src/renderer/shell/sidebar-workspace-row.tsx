@@ -145,6 +145,9 @@ const SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS =
 const GLYPH_BOX_CLS =
   "inline-flex size-4 shrink-0 items-center justify-center text-fg2";
 const STATUS_DOT_BASE_CLS = "size-1.5 rounded-full";
+// Archive's 24px button ends 4px from the row's edge; trailing content ends
+// 8px in. A 20px end slot (plus the 6px gap) keeps the last PR control clear.
+const COMPACT_PR_END_CLS = "inline-flex min-w-5 shrink-0 items-center justify-end";
 // Idle under a repository header or a same-project parent: deliberately faint,
 // so "nothing to report" never reads as a status.
 const IDLE_DOT_CLS = "size-1.5 rounded-full bg-(--sidebar-idle-dot)";
@@ -491,19 +494,23 @@ export function SidebarWorkspaceRow({
               <SidebarPrMarks groups={prMarkGroups(pulls)} layout={prMarkLayout(prMarkGroups(pulls), 0, true)} />
             </span>
           )}
-          {endMark === "loader" ? (
-            <ActivityScope.Provider value={isCloudWorkspace(workspace.path) ? undefined : true}>
-              <span className={TRAILING_SLOT_CLS} data-sidebar-end-mark="loader">
-                <AgentActivityIndicator activity={activity} />
+          {/* Behind Compact's PR controls the end keeps at least the slot
+              hover's Archive covers, so Archive never lands on a PR control. */}
+          <span className={compact && pulls.length > 0 ? COMPACT_PR_END_CLS : "contents"}>
+            {endMark === "loader" ? (
+              <ActivityScope.Provider value={isCloudWorkspace(workspace.path) ? undefined : true}>
+                <span className={TRAILING_SLOT_CLS} data-sidebar-end-mark="loader">
+                  <AgentActivityIndicator activity={activity} />
+                </span>
+              </ActivityScope.Provider>
+            ) : endMark === "dot" ? (
+              <span className={TRAILING_SLOT_CLS} role="img" aria-label={statusDotLabel} data-sidebar-end-mark="dot">
+                <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} />
               </span>
-            </ActivityScope.Provider>
-          ) : endMark === "dot" ? (
-            <span className={TRAILING_SLOT_CLS} role="img" aria-label={statusDotLabel} data-sidebar-end-mark="dot">
-              <span className={cn(STATUS_DOT_BASE_CLS, statusDot)} />
-            </span>
-          ) : compact && sidebarCompactShowsTime({ working, statusDot: !!statusDot }) ? (
-            <span className="text-fg3 text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
-          ) : null}
+            ) : compact && sidebarCompactShowsTime({ working, statusDot: !!statusDot }) ? (
+              <span className="text-fg3 text-3xxs shrink-0 tabular-nums">{formatCompactAge(updatedAt)}</span>
+            ) : null}
+          </span>
         </span>
         </span>
         {twoLine && (

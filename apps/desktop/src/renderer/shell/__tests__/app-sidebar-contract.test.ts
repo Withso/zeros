@@ -489,3 +489,33 @@ describe("sidebar repository headers", () => {
     expect(panel).toContain("forgetRepositoryCollapsed(project.id);");
   });
 });
+
+describe("sidebar styles stay with their components", () => {
+  // RULES.md: no feature styling in a global stylesheet; shared keyframes may.
+  it("keeps the Working shimmer beside the row status, on the shared keyframes", () => {
+    const global = source("styles/global/animations.css");
+    const local = source("apps/desktop/src/renderer/shell/sidebar-workspace-status.css");
+    expect(global).not.toContain(".zeros-working-shimmer");
+    expect(global).toContain("@keyframes zeros-gibberish-thinking");
+    expect(local).toContain(".zeros-working-shimmer");
+    expect(local).toContain("animation: zeros-gibberish-thinking 2s linear infinite;");
+    expect(local).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.zeros-working-shimmer/);
+    expect(source("apps/desktop/src/renderer/shell/sidebar-workspace-row-meta.tsx")).toContain('import "./sidebar-workspace-status.css";');
+  });
+});
+
+describe("sidebar pointer ownership", () => {
+  // The arrow and its wrapper sit over the full-row toggle; only the actions
+  // may take clicks there, or the arrow stops toggling.
+  it("leaves header right ends pointer-transparent except their actions", () => {
+    expect(GROUP_HEADER).toContain('<span className="pointer-events-none relative flex shrink-0 items-center gap-0.5">');
+    expect(GROUP_HEADER).toContain('<span className="pointer-events-auto contents">{actions}</span>');
+    expect(HEADER).toContain('<div className="pointer-events-none relative flex shrink-0 items-center">');
+  });
+
+  // Compact keeps hover's Archive slot clear behind its PR controls.
+  it("reserves Archive's slot after Compact PR controls", () => {
+    expect(ROW).toContain('const COMPACT_PR_END_CLS = "inline-flex min-w-5 shrink-0 items-center justify-end";');
+    expect(ROW).toContain('<span className={compact && pulls.length > 0 ? COMPACT_PR_END_CLS : "contents"}>');
+  });
+});
