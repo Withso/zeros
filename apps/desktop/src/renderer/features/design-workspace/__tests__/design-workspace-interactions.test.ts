@@ -245,6 +245,7 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("const keyboardSegmentFocus =");
     expect(readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-inspector-kit.tsx"), "utf8"))
       .toContain("event.metaKey || event.ctrlKey || event.altKey || event.shiftKey");
+    expect(source).toContain("keyboardSegmentFocus && !event.shiftKey");
     expect(source).toContain("const escapeShortcut = event.key === \"Escape\";");
     expect(source).toContain("confirmed.sourceVersion !== queued.sourceVersion");
     expect(source).toContain("if (selectedFrame.sourceVersion !== queued.sourceVersion) return;");

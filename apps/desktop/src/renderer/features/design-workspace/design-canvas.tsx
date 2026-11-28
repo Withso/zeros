@@ -6674,7 +6674,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         designSurfaceFocused &&
         (arrowShortcut || toolShortcut || escapeShortcut) &&
         !panelControlKeepsArrows &&
-        !(arrowShortcut && (keyboardTreeFocus || keyboardSegmentFocus));
+        !(arrowShortcut && (keyboardTreeFocus || (keyboardSegmentFocus && !event.shiftKey)));
       if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();
