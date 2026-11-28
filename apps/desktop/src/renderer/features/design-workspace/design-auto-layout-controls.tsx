@@ -40,6 +40,7 @@ import {
   keepDesignPopoverWhileEditing,
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
+  inspectorSegmentedArrowKeyDown,
 } from "./design-inspector-kit";
 import {
   type DesignLayoutAction,
@@ -582,7 +583,7 @@ export function DesignAutoLayoutControls({
               aria-label="Auto layout"
               className="zd-segmented min-w-0 flex-1"
             >
-              {FLOWS.map(([key, label, Icon]) => (
+              {FLOWS.map(([key, label, Icon], index) => (
                 <Tooltip
                   key={key}
                   label={
@@ -600,6 +601,15 @@ export function DesignAutoLayoutControls({
                     aria-label={`Auto layout: ${label}`}
                     aria-pressed={!flowMixed && flow === key}
                     onClick={() => onAction({ type: "auto-layout", flow: key })}
+                    onKeyDown={(event) =>
+                      inspectorSegmentedArrowKeyDown(
+                        event,
+                        index,
+                        FLOWS.length,
+                        () => !disabled,
+                        (next) => onAction({ type: "auto-layout", flow: FLOWS[next]![0] }),
+                      )
+                    }
                   >
                     <Icon />
                   </button>

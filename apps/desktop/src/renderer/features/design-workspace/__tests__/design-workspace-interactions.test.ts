@@ -240,6 +240,12 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("const arrowShortcut =");
     expect(source).toContain("const toolShortcut =");
     expect(source).toContain("!panelControlKeepsArrows");
+    expect(layersSource).toContain('event.currentTarget.dataset.designPointerFocus = "";');
+    expect(layersSource).toContain("layerRowFocusIsPointerDriven(event.currentTarget)");
+    expect(source).toContain("const keyboardSegmentFocus =");
+    expect(source).toContain("const escapeShortcut = event.key === \"Escape\";");
+    expect(source).toContain("confirmed.sourceVersion !== queued.sourceVersion");
+    expect(source).toContain("if (selectedFrame.sourceVersion !== queued.sourceVersion) return;");
     expect(source).toContain(
       "if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;",
     );

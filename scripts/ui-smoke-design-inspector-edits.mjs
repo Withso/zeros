@@ -288,7 +288,71 @@ export async function runDesignFillHistorySmoke({ page, check }) {
   );
 }
 
+
+async function waitForHeadingNudgeReady(page) {
+  await page.waitForFunction(async () => {
+    const [cache, runtimes, store, ui] = await Promise.all([
+      import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts"),
+      import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts"),
+      import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts"),
+      import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts"),
+    ]);
+    const frame = cache.designWorkspaceSnapshotCache.getSnapshot("ws_design_harness").data
+      ?.frames.find((candidate) => candidate.file === "home.html");
+    const runtime = runtimes.designFrameRuntime("ws_design_harness", "home.html");
+    const state = store.designRuntimeFrameState("ws_design_harness", "home.html");
+    const view = ui.designWorkspaceView("ws_design_harness");
+    const details = state?.detailsByNode["home-heading"];
+    return Boolean(frame && runtime?.sourceVersion === frame.sourceVersion &&
+      state?.sourceVersion === frame.sourceVersion && details?.sourceVersion === frame.sourceVersion &&
+      details.parentCoordinateSpace !== null && view.selectedNodeIds.includes("home-heading"));
+  });
+}
+
+async function runDesignCanvasFocusReturnSmoke({ page, check }) {
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?autoLayout`,
+    { waitUntil: "networkidle" },
+  );
+  await openLayersDrawer(page);
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
+    .click();
+  await waitForHeadingNudgeReady(page);
+  const size = page.getByRole("textbox", { name: "Size", exact: true });
+  await expect(size).toBeEnabled();
+  const canvasFocused = () =>
+    page.evaluate(() => document.activeElement?.closest?.("[data-design-canvas-viewport]") !== null);
+  const transactions = () =>
+    page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).filter((operation) => operation === "design.transaction.apply").length);
+  const transactionBase = await transactions();
+  await size.fill("20");
+  await size.press("Enter");
+  await expect.poll(canvasFocused).toBe(true);
+  await expect.poll(() => writes(page)).toBe(1);
+  check("Enter commits an inspector field and returns focus to the canvas", true);
+
+  await size.fill("21");
+  await size.press("Escape");
+  await expect.poll(canvasFocused).toBe(true);
+  expect(await writes(page)).toBe(1);
+  check("Escape reverts an inspector field and returns focus to the canvas", true);
+
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(transactions).toBe(transactionBase + 1);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(transactions).toBe(transactionBase + 2);
+  check("arrows nudge after an inspector commit, including while the prior move settles", true);
+
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]').click();
+  await waitForHeadingNudgeReady(page);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(transactions).toBe(transactionBase + 3);
+  check("a pointer-clicked Layers row hands arrows to canvas nudging", true);
+}
+
 export async function runDesignInspectorEditsSmoke(context) {
+  await runDesignCanvasFocusReturnSmoke(context);
   await runDesignTransformCommitSmoke(context);
   await runDesignFieldHistorySmoke(context);
   await runDesignFillHistorySmoke(context);

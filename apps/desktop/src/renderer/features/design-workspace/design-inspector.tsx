@@ -419,6 +419,15 @@ export function designStyleTargetNodeId({
     (details && details.oid === layoutRootId ? details.oid : null);
 }
 
+function inspectorCanvasViewport(from: Element): HTMLElement | null {
+  return (from.closest("[data-design-workspace-surface]") ?? document.querySelector("[data-design-workspace-surface]:not([inert])"))
+    ?.querySelector<HTMLElement>("[data-design-canvas-viewport]") ?? null;
+}
+
+function focusInspectorCanvasViewport(from: Element): void {
+  inspectorCanvasViewport(from)?.focus({ preventScroll: true });
+}
+
 export function InspectorEditField({
   numericValue,
   icon,
@@ -1027,7 +1036,9 @@ export function InspectorEditField({
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              void commit();
+              focusInspectorCanvasViewport(input);
             } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
               event.preventDefault();
               const current = mixedStepsRef.current ?? { steps: 0, fine: false };
@@ -1088,7 +1099,10 @@ export function InspectorEditField({
                 mixedStepsRef.current = null;
                 mixedSteps?.cancel();
               }
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              const viewport = inspectorCanvasViewport(input);
+              input.blur();
+              window.requestAnimationFrame(() => viewport?.focus({ preventScroll: true }));
             }
           }}
         />

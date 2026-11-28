@@ -61,6 +61,7 @@ import {
   type DesignFrameGeometryWire,
 } from "../../platform/git";
 import { cn } from "../../shared/ui/cn";
+import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import {
   DesignCanvasItemsLayer,
   DesignCanvasItemsLimitNotice,
@@ -2882,7 +2883,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (gestureCancelRef.current) return true;
       const selection = designWorkspaceView(workspaceId);
       if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) return true;
-      if (nudgeCommitRef.current || queuedNudgeRef.current) {
+      if (nudgeCommitRef.current || queuedNudgeRef.current || pendingEdits) {
         const previous = queuedNudgeRef.current;
         const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
           owner: captureDesignPageOwner(workspaceId), frame: selectedFrame.file,
@@ -2993,6 +2994,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       selectedNodeDetailsList,
       selectedRuntimeTree,
       nudgeSelectedFrames,
+      pendingEdits,
       workspaceId,
     ],
   );
@@ -3153,17 +3155,28 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const selection = designWorkspaceView(workspaceId);
     if (!active || !isCurrentDesignPageOwner(queued.owner) || queued.lifetime !== nudgeLifetimeRef.current ||
       queued.selectionEvent !== selection.selectionEvent || queued.theme !== selection.activeTheme ||
-      !queued.sourceVersion || selectedFrame?.file !== queued.frame || selectedFrame.sourceVersion !== queued.sourceVersion) {
+      selectedFrame?.file !== queued.frame) {
       queuedNudgeRef.current = null;
       return;
     }
+    const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((frame) => frame.file === queued.frame);
+    if (!confirmed) return;
+    if (!queued.sourceVersion) {
+      if (pendingEdits || selectedFrame.sourceVersion !== confirmed.sourceVersion) return;
+      queued.sourceVersion = confirmed.sourceVersion;
+    }
+    if (confirmed.sourceVersion !== queued.sourceVersion) {
+      queuedNudgeRef.current = null;
+      return;
+    }
+    if (selectedFrame.sourceVersion !== queued.sourceVersion) return;
     if (!queued.frames && (designFrameRuntime(workspaceId, queued.frame)?.sourceVersion !== queued.sourceVersion ||
       (selection.selectedTargets.some((target) => target.nodeId) &&
         selection.selectedTargets.some((target) => target.nodeId && !selectedNodeDetailsList.some((details) => details.oid === target.nodeId && details.sourceVersion === queued.sourceVersion))))) return;
     queuedNudgeRef.current = null;
     nudgeSelectedNode(queued.dx, queued.dy);
     if (queued.released) finishNodeNudge();
-  }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, nudgeSelectedNode, finishNodeNudge]);
+  }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, pendingEdits, nudgeSelectedNode, finishNodeNudge]);
 
   /** Move/resize previews paint one node; release publishes one engine write. */
   /** Several selected frames follow the pointer together, snap as one box
@@ -6388,11 +6401,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const pointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
       const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
+      const segment = event.target.closest<HTMLElement>(".zd-segment");
+      if (segment) segment.dataset.designPointerFocus = "";
       designFocusOwnerRef.current = inSurface;
     };
     const focusIn = (event: FocusEvent) => {
       if (!(event.target instanceof Element) || event.target === document.body) return;
       const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
+      if (event.target instanceof HTMLElement && event.target.classList.contains("zd-segment") && getLastInputModality() === "keyboard")
+        delete event.target.dataset.designPointerFocus;
       designFocusOwnerRef.current = inSurface;
     };
     document.addEventListener("pointerdown", pointerDown, true);
@@ -6631,6 +6648,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey;
+      const escapeShortcut = event.key === "Escape";
       const toolShortcut =
         !event.metaKey &&
         !event.ctrlKey &&
@@ -6644,15 +6662,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         activeElement instanceof HTMLElement &&
         Boolean(activeElement.closest("[data-design-frame-row], [data-design-layer-id]")) &&
         activeElement.dataset.designPointerFocus === undefined;
+      const keyboardSegmentFocus =
+        activeElement instanceof HTMLElement &&
+        activeElement.classList.contains("zd-segment") &&
+        activeElement.dataset.designPointerFocus === undefined;
       // Panel controls keep focus for their rings and for Tab/Escape, while
       // canvas-owned tool and nudge keys still act without a click back.
       // Keyboard-focused Layers rows keep every tree arrow, including edges
       // the tree itself cannot move past.
       const panelShortcutFocus =
         designSurfaceFocused &&
-        (arrowShortcut || toolShortcut) &&
+        (arrowShortcut || toolShortcut || escapeShortcut) &&
         !panelControlKeepsArrows &&
-        !(arrowShortcut && keyboardTreeFocus);
+        !(arrowShortcut && (keyboardTreeFocus || keyboardSegmentFocus));
       if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();

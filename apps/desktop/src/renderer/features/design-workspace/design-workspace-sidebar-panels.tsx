@@ -349,6 +349,9 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       aria-expanded={row.discloses ? row.expanded : undefined}
       aria-keyshortcuts="F2 Meta+C Control+C Meta+D Control+D Delete Backspace"
       onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+      onPointerDown={(event) => {
+        event.currentTarget.dataset.designPointerFocus = "";
+      }}
       onPointerEnter={() => actions.frameIntent(frame.file)}
       onFocus={(event) => {
         markLayerRowFocusModality(event);
@@ -439,6 +442,9 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
           actions.focusLayer(frame, layer.node.oid);
         }}
         onDoubleClick={(event) => actions.rowDoubleClick(event, row)}
+        onPointerDown={(event) => {
+          event.currentTarget.dataset.designPointerFocus = "";
+        }}
         onClick={(event) => {
           if (layer.hasChildren && (event.target as HTMLElement).closest("[data-layer-disclosure]")) {
             actions.toggleExpanded(row);

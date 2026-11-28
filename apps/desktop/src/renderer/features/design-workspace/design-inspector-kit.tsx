@@ -297,7 +297,7 @@ export function InspectorSegmented<T extends string>({
       aria-label={label}
       className={cn("zd-segmented", className)}
     >
-      {options.map((option) => (
+      {options.map((option, index) => (
         <Tooltip
           key={option.value}
           label={
@@ -313,6 +313,15 @@ export function InspectorSegmented<T extends string>({
             }
             aria-pressed={value === option.value}
             onClick={() => onChange(option.value)}
+            onKeyDown={(event) =>
+              inspectorSegmentedArrowKeyDown(
+                event,
+                index,
+                options.length,
+                (next) => !disabled && !options[next]!.disabled,
+                (next) => onChange(options[next]!.value),
+              )
+            }
           >
             {option.icon ?? option.label}
           </button>
@@ -320,6 +329,35 @@ export function InspectorSegmented<T extends string>({
       ))}
     </div>
   );
+}
+
+export function inspectorSegmentedArrowKeyDown(
+  event: React.KeyboardEvent<HTMLElement>,
+  index: number,
+  count: number,
+  enabled: (index: number) => boolean,
+  activate: (index: number) => void,
+): void {
+  if (event.currentTarget.dataset.designPointerFocus !== undefined) return;
+  const direction = ["ArrowRight", "ArrowDown"].includes(event.key)
+    ? 1
+    : ["ArrowLeft", "ArrowUp"].includes(event.key)
+      ? -1
+      : 0;
+  if (!direction) return;
+  event.preventDefault();
+  event.stopPropagation();
+  let next = index;
+  for (let step = 0; step < count; step += 1) {
+    next = (next + direction + count) % count;
+    if (enabled(next)) break;
+  }
+  if (next === index || !enabled(next)) return;
+  activate(next);
+  const buttons = event.currentTarget
+    .closest(".zd-segmented")
+    ?.querySelectorAll<HTMLButtonElement>(".zd-segment");
+  buttons?.[next]?.focus();
 }
 
 // --- CHECKBOX ROW ---
