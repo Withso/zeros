@@ -6,6 +6,7 @@ import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPr
 // re-rendering another's components.
 
 import { SendQueue } from "./send-queue";
+import { localQueueJournal, localQueuedPrompt, restoredLocalQueue } from "./local-queue-journal";
 import { AGENT_UPDATE_BACKLOG_LIMIT, createAgentUpdateFlushScheduler } from "./agent-update-flush-scheduler";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
 import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
@@ -1335,6 +1336,57 @@ export function AgentSessionsProvider({
     },
     [getStore],
   );
+
+  // Local follow-ups outlive a quit or reload. A chat's saved queue is only
+  // rewritten after it has been read back this session, so clearing a chat
+  // before its restore cannot erase what it saved. In-flight sends are never
+  // saved: a restored entry is always one the agent has not received.
+  const localQueueReadRef = useRef(new Set<string>());
+  const localQueueSavesRef = useRef(new Set<string>());
+  const isLocalQueueChat = useCallback((chatId: string) =>
+    !parseCloudScopedId(chatId) && !isCloudWorkspace(getStore().sessions[chatId]?.cwd), [getStore]);
+  const saveLocalQueue = useCallback((chatId: string) => {
+    if (!localQueueReadRef.current.has(chatId) || !isLocalQueueChat(chatId)) return;
+    const queue = sendQueueRef.current;
+    const messages = getStore().sessions[chatId]?.messages ?? [];
+    const entries = (queue.get(chatId) ?? [])
+      .filter(entry => !entry.cloud && !entry.steerRequest && !queue.isSending(chatId, entry.bubbleId))
+      .map(entry => localQueuedPrompt(entry, messages));
+    void localQueueJournal().write(chatId, entries).catch(() => { /* The in-memory queue still sends; only restart recovery is lost. */ });
+  }, [getStore, isLocalQueueChat]);
+  useEffect(() => {
+    const queue = sendQueueRef.current;
+    queue.onChange = chatId => {
+      if (localQueueSavesRef.current.has(chatId)) return;
+      localQueueSavesRef.current.add(chatId);
+      queueMicrotask(() => {
+        localQueueSavesRef.current.delete(chatId);
+        saveLocalQueue(chatId);
+      });
+    };
+    return () => { queue.onChange = undefined; };
+  }, [saveLocalQueue]);
+  /** Bring back a Local chat's saved follow-ups once its history is resident.
+   * They return paused, in the queue card, so nothing is sent until the user
+   * chooses Send now. */
+  const restoreLocalQueue = useCallback(async (chatId: string) => {
+    if (localQueueReadRef.current.has(chatId) || !isLocalQueueChat(chatId)) return;
+    let saved: Awaited<ReturnType<ReturnType<typeof localQueueJournal>["read"]>> = [];
+    try { saved = await localQueueJournal().read(chatId); } catch { return; }
+    if (localQueueReadRef.current.has(chatId)) return;
+    const slot = getStore().sessions[chatId];
+    if (!slot || slot.transcriptState !== "resident") return;
+    localQueueReadRef.current.add(chatId);
+    const queued = sendQueueRef.current.get(chatId) ?? [];
+    const known = new Set([...queued.map(entry => entry.bubbleId), ...slot.messages.map(message => message.id)]);
+    const { entries, bubbles } = restoredLocalQueue(chatId, saved, known);
+    if (entries.length === 0) { saveLocalQueue(chatId); return; }
+    getStore().patchSession(chatId, { messages: [...slot.messages, ...bubbles] });
+    sendQueueRef.current.set(chatId, [...queued, ...entries]);
+    pauseQueue(chatId);
+  }, [getStore, isLocalQueueChat, pauseQueue, saveLocalQueue]);
+  const restoreLocalQueueRef = useRef(restoreLocalQueue);
+  restoreLocalQueueRef.current = restoreLocalQueue;
 
   const retryCloudQueuedPrompt = useCallback((chatId: string, entry: NonNullable<ReturnType<typeof sendQueueRef.current.get>>[number], account: number | undefined,
     folder: string | null | undefined) => {
@@ -5336,8 +5388,14 @@ export function AgentSessionsProvider({
           // Merge the engine's authoritative window into the local slot: keep
           // scrolled-up history, drop a remotely-truncated tail, and don't let a
           // transient empty read wipe the slot. See mergeWindowedTail.
-          const next: AgentMessage[] = cloud && (page.complete || historyReplaced)
+          const merged: AgentMessage[] = cloud && (page.complete || historyReplaced)
             ? retainMessageReferences(cur, windowed) : mergeWindowedTail(cur, windowed);
+          // Local queued bubbles exist only in this renderer until they send.
+          // A history read must not hide one whose payload is still queued.
+          const waiting = cloud ? undefined : new Set((sendQueueRef.current.get(chatId) ?? []).map(entry => entry.bubbleId));
+          const kept = waiting?.size ? cur.filter(message => message.kind === "text" && message.queued && waiting.has(message.id) &&
+            !merged.some(row => row.id === message.id)) : [];
+          const next = kept.length ? [...merged, ...kept] : merged;
           const hasTranscript = next.some(message => message.kind !== "text" || !message.queued);
           const leadingPrompt = next[0]?.id === windowed[0]?.id ? page.leadingPrompt ?? null : fresh.leadingPrompt;
           const leadingChanged = !messageSnapshotsEqual(fresh.leadingPrompt ? [fresh.leadingPrompt] : [], leadingPrompt ? [leadingPrompt] : []);
@@ -5401,13 +5459,14 @@ export function AgentSessionsProvider({
         // another device while this slot sits idle. Reconcile against the engine
         // (a no-op when already current; skips a live in-flight turn) instead of
         // blindly trusting the in-memory snapshot, so re-opening shows the latest.
-        if (slot?.transcriptState === "resident") {
-          void reconcileChatMessages(chatId);
-          return;
-        }
         // Local Personal or organization-local: never a cloud-scoped id or a
         // slot bound to a cloud workspace.
         const localChat = !parseCloudScopedId(chatId) && !isCloudWorkspace(slot?.cwd);
+        if (slot?.transcriptState === "resident") {
+          void reconcileChatMessages(chatId);
+          if (localChat) void restoreLocalQueueRef.current(chatId);
+          return;
+        }
         if (!localChat && !slot?.hasTranscript && !slot?.messages.some(message => message.kind !== "text" || !message.queued) &&
             consumeFreshCloudChat(chatId, slot?.cwd ?? useWorkspaceStore.getState().chats.find(chat => chat.id === chatId)?.folder)) {
           getStore().setSession(chatId, { ...BLANK, ...slot, transcriptState: "resident", hasTranscript: false });
@@ -5417,6 +5476,7 @@ export function AgentSessionsProvider({
         // A Local chat this renderer just created has no history to read.
         if (!slot && localChat && takeFreshLocalChat(chatId)) {
           getStore().setSession(chatId, { ...BLANK, transcriptState: "resident" });
+          void restoreLocalQueueRef.current(chatId);
           return;
         }
         // Publish an explicit cold-read state before any await. `messages: []`
@@ -5530,6 +5590,7 @@ export function AgentSessionsProvider({
           // Re-window once more rather than trying to merge raw deltas into a
           // partial transcript. The in-flight reconcile map dedupes nudges.
           if (changedWhileLoading) void reconcileChatMessages(chatId);
+          if (localChat) void restoreLocalQueueRef.current(chatId);
         } catch (err) {
           if (cache?.epoch !== cacheEpoch) return;
           if (

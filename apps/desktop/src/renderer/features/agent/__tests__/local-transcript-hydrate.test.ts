@@ -60,6 +60,7 @@ function harness(connected = true) {
     presentKnownEmptyLocalTranscript, consumeFreshCloudChat, transcriptCacheFor, presentCachedTranscript, canReplaceCloudTranscript,
     bumpCancelGeneration, clearPrebindGoalSnapshotsForChat, forgetFreshLocalChat,
     prebindBackgroundTasksRef: { current: { clearChat: vi.fn() } },
+    restoreLocalQueueRef: { current: vi.fn(async () => {}) },
   };
   const resetMaps = ["cancelGenerationsRef", "promptAbortRef", "sendingChatsRef", "ensureInFlightRef", "loadFlightKeysRef",
     "loadFlightAdoptOnlyRef", "prebindDirtySessionsRef", "prebindGoalSnapshotsRef", "sendQueueRef", "queueHeldRef",
@@ -80,6 +81,7 @@ function harness(connected = true) {
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return {
     hydrate: context.hydrate as (chatId: string) => Promise<void>, read, resolve, pendingHydrates,
+    restoreLocalQueue: (context.restoreLocalQueueRef as { current: ReturnType<typeof vi.fn> }).current,
     subscribeToCache: context.subscribeToCache as () => () => void,
     resetContext: context.resetContext as (chatId: string) => void,
     prepare: context.prepare as (chatId: string) => Promise<void> | null,
@@ -177,6 +179,8 @@ describe("conversation context reset", () => {
     await preparation;
     expect(slot("chat-1")?.messages).toEqual(messages);
     expect(slot("chat-1")?.hasTranscript).toBe(messages.length > 0);
+    // Saved Local follow-ups return only once authoritative history is resident.
+    expect(h.restoreLocalQueue).toHaveBeenCalledWith("chat-1");
   });
 
   it("ignores a pre-reset history read that finishes after the reset's canonical read", async () => {
@@ -262,6 +266,8 @@ describe("Local transcript hydration", () => {
     await h.hydrate("chat-new");
     expect(h.read).not.toHaveBeenCalled();
     expect(slot("chat-new")).toMatchObject({ transcriptState: "resident", messages: [], hasTranscript: false });
+    // A new chat has nothing saved, but reading marks its queue as savable.
+    expect(h.restoreLocalQueue).toHaveBeenCalledWith("chat-new");
     // Consumed: a later cold reopen reads normally.
     expect(takeFreshLocalChat("chat-new")).toBe(false);
   });
