@@ -197,6 +197,15 @@ export function DesignPositionSection({
   const selection = layoutParents?.length ? layoutParents : [details];
   const placed = !frameSelected && selection.some(designLayoutPlacedByParent);
   const free = !frameSelected && !placed && selection.every((node) => node.layout?.parentId);
+  const arrangementSelection = selection.filter(
+    (node) => node.visible && node.layout?.parentId && !designLayoutPlacedByParent(node),
+  );
+  const mixedParents =
+    arrangementSelection.length > 1 &&
+    new Set(arrangementSelection.map((node) => node.layout?.parentId)).size > 1;
+  const arrangementDisabled =
+    disabled ||
+    (selection.length > 1 && (arrangementSelection.length < 2 || mixedParents));
   const absolute = frameSelected ? null : designLayoutAbsolutePosition(selection);
   const field = (label: string, property: string, extra: DesignLayoutFieldOptions = {}) =>
     renderField(label, property, designLayoutFieldValue(details, property), {
@@ -245,7 +254,7 @@ export function DesignPositionSection({
           />
         </div>
       ) : null}
-      {free ? (
+      {free || arrangementSelection.length >= 2 ? (
         <div
           data-design-position-align=""
           className="grid grid-cols-2 gap-2"
@@ -264,7 +273,7 @@ export function DesignPositionSection({
                       type="button"
                       className="zd-segment"
                       aria-label={label}
-                      disabled={disabled}
+                      disabled={arrangementDisabled}
                       onClick={() =>
                         onAction({ type: "align", axis, value, target: "self" })
                       }
@@ -275,6 +284,29 @@ export function DesignPositionSection({
                 ),
               )}
             </div>
+          ))}
+        </div>
+      ) : null}
+      {(free ? selection.length >= 3 : arrangementSelection.length >= 3) ? (
+        <div
+          data-design-position-distribute=""
+          className="grid grid-cols-2 gap-2"
+        >
+          {([
+            ["x", "Distribute horizontally", AlignHorizontalDistributeCenter],
+            ["y", "Distribute vertically", AlignVerticalDistributeCenter],
+          ] as const).map(([axis, label, Icon]) => (
+            <InspectorIconButton
+              key={label}
+              label={label}
+              tooltip={label}
+              disabled={arrangementDisabled}
+              onClick={() =>
+                onAction({ type: "distribute", axis, target: "self" })
+              }
+            >
+              <Icon />
+            </InspectorIconButton>
           ))}
         </div>
       ) : null}

@@ -163,7 +163,9 @@ import {
   designPointInChildCoordinateSpace,
   designTreeChildIds,
   designSizeInChildCoordinateSpace,
+  designUngroupOperations,
   designWrapInFlow,
+  designWrapSelectionOperations,
 } from "./design-frame-insertion";
 import {
   createDesignGestureLoop,
@@ -6575,6 +6577,65 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           const weight = selectedNodeDetails.styles.fontWeight;
           void commitInlineSpacing(shortcutFrame, selectedNodeDetails, { "font-weight": weight === "bold" || Number(weight) >= 600 ? "400" : "700" });
         }
+        return;
+      }
+      if (!editableTarget && designSurfaceFocused && shortcutFrame && shortcutView.selectedNodeId && workspaceId && folder &&
+        (event.metaKey || event.ctrlKey) && event.code === "KeyG" && !(event.shiftKey && event.altKey)) {
+        event.preventDefault();
+        if (event.repeat) return;
+        const kind = event.shiftKey ? "ungroup" : event.altKey ? "frame" : "group";
+        const owner = captureDesignPageOwner(workspaceId);
+        const lifetime = canvasLifetimeRef.current;
+        const current = () => lifetime === canvasLifetimeRef.current && isCurrentDesignPageOwner(owner) &&
+          designSelectionUnchangedSince(workspaceId, shortcutView);
+        const save = (async () => {
+          if (shortcutView.selectedTargets.some(t => t.frame !== shortcutFrame.file)) throw new Error("Select layers in one frame.");
+          const ids = shortcutView.selectedNodeIds;
+          if (designCanvasStyleToolsBlocked(shortcutFrame, ids)) throw new Error("Group layers in their main component instead.");
+          const runtime = designFrameRuntime(workspaceId, shortcutFrame.file);
+          if (!runtime || runtime.sourceVersion !== shortcutFrame.sourceVersion) throw new Error("The frame is still preparing.");
+          const nodes = await Promise.all(ids.map(id => runtime.getNodeDetails(id)));
+          if (nodes.some(node => !node)) throw new Error("Select layers inside a container.");
+          let operations;
+          let selectId: string | null = null;
+          if (kind === "ungroup") {
+            if (nodes.length !== 1) throw new Error("Select one group to ungroup.");
+            const group = nodes[0]!;
+            const parent = group.layout?.parentId ? await runtime.getNodeDetails(group.layout.parentId) : null;
+            if (!parent) throw new Error("Select a group inside a container.");
+            const runtimeSnapshot = await runtime.getSnapshot();
+          const childIds = designTreeChildIds(runtimeSnapshot.tree, group.oid, runtimeSnapshot.frame.oid);
+            if (childIds.length === 0) throw new Error("The group's layers are still preparing.");
+            const children = await Promise.all(childIds.map(id => runtime.getNodeDetails(id)));
+            if (children.some(node => !node)) throw new Error("The group's layers are still preparing.");
+            if (children.some(node => node?.visible === false))
+              throw new Error("Show the group's hidden layers before ungrouping it.");
+            operations = designUngroupOperations(parent, group, children as DesignRuntimeNodeDetails[]);
+            selectId = children[0]?.oid ?? null;
+          } else {
+            const parentId = nodes[0]?.layout?.parentId;
+            const parent = parentId ? await runtime.getNodeDetails(parentId) : null;
+            if (!parent) throw new Error("Select layers inside a container.");
+            const id = `selection-${kind}-${crypto.randomUUID()}`;
+            const runtimeSnapshot = await runtime.getSnapshot();
+            const siblingOrder = new Map(
+              designTreeChildIds(runtimeSnapshot.tree, parent.oid, runtimeSnapshot.frame.oid).map((nodeId, index) => [nodeId, index] as const),
+            );
+            const orderedNodes = [...(nodes as DesignRuntimeNodeDetails[])].sort(
+              (first, second) => (siblingOrder.get(first.oid) ?? 0) - (siblingOrder.get(second.oid) ?? 0),
+            );
+            operations = designWrapSelectionOperations(parent, orderedNodes, id, kind);
+            selectId = id;
+          }
+          if (!current()) return;
+          const result = await applyDesignEditCached(workspaceId, shortcutFrame, { schemaVersion: 1, transactionId: `desktop:${crypto.randomUUID()}`,
+            actor: { kind: "human", id: "desktop" }, intent: kind === "ungroup" ? "Ungroup selection" : kind === "frame" ? "Frame selection" : "Group selection", createdAt: Date.now(), operations },
+            { isCurrent: current, movementGuard: { sourceVersion: shortcutFrame.sourceVersion, geometry: frameGeometry(shortcutFrame) } });
+          const frame = result.snapshot?.frames.find(f => f.file === shortcutFrame.file);
+          if (frame && selectId && current()) void selectDesignNode({ workspaceId, folder, frame, nodeId: selectId, owner }).catch(() => {});
+        })();
+        savedEditingSession?.retain(save);
+        void save.catch(error => { if (current()) toast.error(kind === "ungroup" ? "Couldn't ungroup selection" : "Couldn't group selection", { description: errorMessage(error) }); });
         return;
       }
       if (!editableTarget && designSurfaceFocused && shortcutFrame && shortcutView.selectedNodeId && workspaceId && folder &&

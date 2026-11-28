@@ -72,7 +72,7 @@ export function designLayoutChildrenSummary(
 
 /** Local painted bounds include a child's own rotation, scale and pivot. An
  * ancestor transform never changes the size of this container's layout box. */
-function childBounds(node: DesignRuntimeNodeDetails) {
+export function designLayoutChildBounds(node: DesignRuntimeNodeDetails) {
   const transform = designLayoutTransform(node);
   const [a, b, c, d] = designTransformLinear(transform);
   const width = borderSize(node, "x"),
@@ -161,7 +161,7 @@ export function designLayoutChildUpdates(
     )
       continue;
     if (action.type === "resize-fit") {
-      const bounds = group.map(childBounds);
+      const bounds = group.map(designLayoutChildBounds);
       const dx = Math.floor(
         Math.min(
           0,

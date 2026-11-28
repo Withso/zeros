@@ -79,6 +79,35 @@ describe("Absolute position in Position", () => {
     expect(onAction).toHaveBeenCalledWith({ type: "place-freely" });
   });
 
+  it("disables multi-selection arrangement when the layers have different parents", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    const third = { ...layer("c", "absolute", "block") };
+    second.layout = { ...second.layout!, parentId: "other" };
+    third.layout = { ...third.layout!, parentId: "other" };
+    render(first, [first, second, third]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(true);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Distribute horizontally"]')!.disabled).toBe(true);
+  });
+
+  it("keeps arrangement available for free siblings selected with an auto-layout child", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    const placed = layer("placed", "static");
+    render(first, [first, second, placed]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(false);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Distribute horizontally"]')).toBeNull();
+  });
+
+  it("ignores hidden layers when deciding whether arrangement is available", () => {
+    const first = { ...layer("a", "absolute", "block") };
+    const second = { ...layer("b", "absolute", "block") };
+    const hidden = { ...layer("hidden", "absolute", "block"), visible: false };
+    hidden.layout = { ...hidden.layout!, parentId: "other" };
+    render(first, [first, second, hidden]);
+    expect(host!.querySelector<HTMLButtonElement>('button[aria-label="Align left"]')!.disabled).toBe(false);
+  });
+
   it("is absent where the parent has no auto layout", () => {
     expect(render(layer("child", "absolute", "block")).box).toBeNull();
   });
