@@ -43,6 +43,7 @@ import {
   bridgeChatDelete,
 } from "../workspace-bridge";
 import type { RuntimeClient } from "../ws-client";
+import { WorkspaceRuntimeClient } from "../workspace-runtime-client";
 import { clearTeamStore } from "../../../features/team/team-store";
 import { subscribeCloudPromptErasure } from "../../cloud-prompt-erasure";
 import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
@@ -55,6 +56,12 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
       return resp;
     },
   } as unknown as RuntimeClient;
+}
+
+function localRuntimeClient(methods: Record<string, unknown>): WorkspaceRuntimeClient {
+  const bridge = Object.create(WorkspaceRuntimeClient.prototype) as WorkspaceRuntimeClient;
+  Object.defineProperty(bridge, "executionIdentity", { value: { kind: "local", sidecar: "active" } });
+  return Object.assign(bridge, methods);
 }
 
 describe("chat snapshot authority", () => {
@@ -149,6 +156,42 @@ describe("requestWorkspaceList", () => {
     expect(seen.type).toBe("WORKSPACE_REQUEST");
     expect(seen.op).toBe("workspace.list");
     expect(out).toEqual(workspaces);
+  });
+
+  it("waits for Local rows when a confirmed cloud catalog answers first", async () => {
+    // Relaunch: the cloud catalog is warm, so the aggregate list publishes
+    // before the Local engine's rows arrive. A restored attachment pill then
+    // resolved its Local folder against cloud rows only and sent the raw path
+    // as the workspace id, which the engine rejected as not found.
+    const local = { id: "ws_local", path: "/Users/me/zeros/workspaces/repo/Ochre" };
+    const cloud = { id: "cloud:org:ws", path: "cloud://org/ws" };
+    const bridge = localRuntimeClient({
+      request: async () => ({
+        type: "WORKSPACE_RESPONSE",
+        op: "workspace.list",
+        result: { workspaces: [cloud], confirmedLocalWorkspaces: false, confirmedCloudWorkspaces: true },
+      }),
+      requestLocalMetadata: vi.fn(async () => ({
+        type: "WORKSPACE_RESPONSE",
+        op: "workspace.list",
+        result: { workspaces: [local] },
+      })),
+    });
+    expect(await requestWorkspaceList(bridge)).toEqual([local, cloud]);
+    expect(bridge.requestLocalMetadata).toHaveBeenCalledWith("workspace.list");
+  });
+
+  it("keeps the unconfirmed rows when the Local engine cannot answer", async () => {
+    const cloud = { id: "cloud:org:ws", path: "cloud://org/ws" };
+    const bridge = localRuntimeClient({
+      request: async () => ({
+        type: "WORKSPACE_RESPONSE",
+        op: "workspace.list",
+        result: { workspaces: [cloud], confirmedLocalWorkspaces: false },
+      }),
+      requestLocalMetadata: async () => { throw new Error("Local engine is starting"); },
+    });
+    expect(await requestWorkspaceList(bridge)).toEqual([cloud]);
   });
 
   it("keeps the same workspace resolvable by Code agents in either visible mode", async () => {
