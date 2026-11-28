@@ -14,6 +14,7 @@ import {
   foldTransformOffset,
   hasLegacyRelocationCandidate,
 } from "../design-layout-values";
+import { designLayoutSelectionUpdates } from "../design-layout-selection";
 
 function node(styles: Record<string, string> = {}): DesignRuntimeNodeDetails {
   return {
@@ -82,6 +83,126 @@ describe("designer layout values", () => {
     ).toMatchObject({
       left: "15px",
     });
+  });
+
+  it("aligns a multi-selection to its own bounds rather than the parent", () => {
+    const first = node({ left: "10px", width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, x: 10 };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ left: "100px", width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, x: 100 };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.get("first")).toMatchObject({ left: "120px" });
+    expect(updates.get("second")?.left).toBeUndefined();
+  });
+
+  it("distributes a multi-selection by equal gaps in visual order", () => {
+    const make = (oid: string, x: number, width: number) => {
+      const item = node({ left: `${x}px`, width: `${width}px` });
+      item.oid = oid;
+      item.layout = { ...item.layout!, x };
+      item.box = { ...item.box!, width };
+      item.rect = { ...item.rect, width };
+      return item;
+    };
+    const updates = designLayoutSelectionUpdates(
+      [make("c", 300, 80), make("a", 10, 40), make("b", 100, 60)],
+      { type: "distribute", axis: "x", target: "self" },
+    );
+    expect(updates.get("a")?.left).toBeUndefined();
+    expect(updates.get("b")).toMatchObject({ left: "145px" });
+    expect(updates.get("c")?.left).toBeUndefined();
+  });
+
+  it("leaves mixed-parent selections unchanged", () => {
+    const first = node({ width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, parentId: "parent-a", x: 10 };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, parentId: "parent-b", x: 100 };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.size).toBe(0);
+  });
+
+  it("does not position a static parent when aligning its layers", () => {
+    const first = node({ width: "40px", left: "210px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, x: 10, parentPosition: "static", isContainingBlock: false };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ width: "60px", left: "300px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, x: 100, parentPosition: "static", isContainingBlock: false };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.has("parent")).toBe(false);
+    expect(updates.get("first")).toMatchObject({ left: "320px" });
+  });
+
+  it("moves block-flow layers when a multi-selection is aligned", () => {
+    const first = node({ position: "static", left: "auto", width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, x: 10 };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ position: "static", left: "auto", width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, x: 100 };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.get("first")).toMatchObject({ left: "110px" });
+  });
+
+  it("leaves auto-layout children out of selection distribution", () => {
+    const free = node({ left: "10px" });
+    free.oid = "free";
+    free.layout = { ...free.layout!, x: 10 };
+    const placed = node({ position: "relative", left: "100px" });
+    placed.oid = "placed";
+    placed.layout = {
+      ...placed.layout!,
+      x: 100,
+      parentDisplay: "flex",
+    };
+    const updates = designLayoutSelectionUpdates([free, placed], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.has("placed")).toBe(false);
   });
 
   it("pins selected parents and children independently in either selection order", () => {

@@ -4,6 +4,7 @@ import {
   classifyDesignFill,
   formatDesignGradient,
   parseDesignGradient,
+  parseEditableDesignGradient,
   readDesignImageUrl,
 } from "../design-fill-values";
 
@@ -31,6 +32,8 @@ describe("design fill values", () => {
       end: "#ffffff", // check:ui ignore-line (authored CSS fixture)
       startPosition: "0%",
       endPosition: "100%",
+      startPositionAuthored: true,
+      endPositionAuthored: true,
       repeating: false,
     });
     expect(
@@ -71,6 +74,97 @@ describe("design fill values", () => {
     expect(formatDesignGradient(repeating!)).toBe(
       "repeating-linear-gradient(135deg, red 0px, blue 24px)",
     );
+  });
+
+  it("preserves a var() gradient angle and token stops across partial edits", () => {
+    const parsed = parseDesignGradient(
+      "linear-gradient(var(--gradient-angle), var(--accent), var(--success))",
+    );
+    expect(parsed).toMatchObject({
+      angle: "var(--gradient-angle)",
+      start: "var(--accent)",
+      end: "var(--success)",
+    });
+    expect(formatDesignGradient({ ...parsed!, end: "#FFFFFF" })).toBe( // check:ui ignore-line -- authored CSS fixture
+      "linear-gradient(var(--gradient-angle), var(--accent) 0%, #FFFFFF 100%)", // check:ui ignore-line -- authored CSS fixture
+    );
+    expect(formatDesignGradient({ ...parsed!, angle: 90 })).toBe(
+      "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
+    );
+  });
+
+  it("distinguishes a token angle from an unsupported third token stop", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--accent), red, blue)",
+        "linear-gradient(rgb(81, 81, 204) 0%, rgb(255, 0, 0) 50%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--gradient-angle), var(--accent), var(--success))",
+        "linear-gradient(90deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toMatchObject({ angle: "var(--gradient-angle)" });
+  });
+
+  it("round-trips tokenized stop positions and multiline conic angles", () => {
+    const repeating = parseDesignGradient(
+      "repeating-linear-gradient(var(--gradient-angle), red 0px, blue var(--stop-end))",
+    );
+    expect(repeating).toMatchObject({
+      angle: "var(--gradient-angle)",
+      startPosition: "0px",
+      endPosition: "var(--stop-end)",
+    });
+    expect(formatDesignGradient(repeating!)).toBe(
+      "repeating-linear-gradient(var(--gradient-angle), red 0px, blue var(--stop-end))",
+    );
+
+    const conic = parseDesignGradient(
+      "conic-gradient(from var(--gradient-angle,\n 90deg), red, blue)",
+    );
+    expect(conic?.angle).toBe("var(--gradient-angle,\n 90deg)");
+  });
+
+  it("keeps a commented color token as the stop color", () => {
+    const parsed = parseDesignGradient(
+      "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+    );
+    expect(parsed).toMatchObject({
+      start: "/* accent */ var(--accent)",
+      startPosition: "0%",
+    });
+    expect(formatDesignGradient(parsed!)).toBe(
+      "linear-gradient(90deg, /* accent */ var(--accent) 0%, blue 100%)",
+    );
+  });
+
+  it("fails closed when a color token supplies hidden stop positions", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+        "linear-gradient(90deg, rgb(81, 81, 204) 0%, rgb(81, 81, 204) 30%, rgb(81, 81, 204) 70%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(90deg, /* accent */ var(--accent), blue)",
+        "linear-gradient(90deg, rgb(81, 81, 204) 20%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps range-valued position tokens editable", () => {
+    expect(
+      parseEditableDesignGradient(
+        "linear-gradient(var(--gradient-angle), #FF0000 var(--start-range), blue)", // check:ui ignore-line -- authored CSS fixture
+        "linear-gradient(90deg, rgb(255, 0, 0) 0%, rgb(255, 0, 0) 30%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      ),
+    ).toMatchObject({
+      angle: "var(--gradient-angle)",
+      startPosition: "var(--start-range)",
+    });
   });
 
   it("fails closed for gradients the two-stop editor cannot preserve", () => {

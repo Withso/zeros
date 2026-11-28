@@ -15,6 +15,7 @@ let root: Root;
 let host: HTMLDivElement;
 
 beforeEach(() => {
+  Element.prototype.scrollIntoView = () => {};
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -156,13 +157,178 @@ describe("destructive fill edits", () => {
     );
   });
 
+  it("preserves token stops when replacing a var() gradient angle", async () => {
+    const authored =
+      "linear-gradient(var(--gradient-angle), var(--accent), var(--success))";
+    const computed =
+      "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)"; // check:ui ignore-line -- CSSOM fixture
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage: computed,
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": { origin: "inline", value: authored },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    const angle = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Gradient angle value"]',
+    );
+    expect(angle).not.toBeNull();
+    await act(async () => setInputValue(angle!, "90"));
+    await act(async () => angle!.blur());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "linear-gradient(90deg, var(--accent) 0%, var(--success) 100%)",
+    );
+  });
+
+  it("preserves token stops when editing the other gradient stop", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value:
+              "linear-gradient(var(--gradient-angle), var(--accent), blue)",
+          },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="End stop"]')!
+        .click(),
+    );
+    const end = document.querySelector<HTMLInputElement>(
+      'input[aria-label="End stop value"]',
+    );
+    expect(end?.disabled).toBe(false);
+    await act(async () => setInputValue(end!, "#FF0000")); // check:ui ignore-line -- authored CSS fixture
+    await act(async () => end!.blur());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "linear-gradient(var(--gradient-angle), var(--accent) 0%, #FF0000 100%)", // check:ui ignore-line -- authored CSS fixture
+    );
+  });
+
+  it("uses the resolved angle when a direction-token linear becomes conic", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(90deg, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value: "linear-gradient(var(--direction), red, blue)",
+          },
+        },
+      },
+    );
+    const onCommit = await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Gradient type"]')!
+        .click(),
+    );
+    const conic = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (node) => node.textContent === "Conic",
+    );
+    expect(conic).toBeDefined();
+    await act(async () => conic!.click());
+
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
+    expect(written["background-image"]).toBe(
+      "conic-gradient(from 90deg, red 0%, blue 100%)",
+    );
+  });
+
+  it("does not edit geometry a tokenized conic gradient hides", async () => {
+    const details = detailsFor(
+      {
+        backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "conic-gradient(from 90deg at 20% 20%, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+      },
+      {
+        authoredStyleProperties: ["background-image"],
+        authoredStyles: {
+          "background-image": {
+            origin: "inline",
+            value:
+              "conic-gradient(from var(--conic-angle,\n 90deg), red, blue)",
+          },
+        },
+      },
+    );
+    await renderEditor(details);
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    expect(
+      document.querySelector<HTMLInputElement>(
+        'input[aria-label="Gradient angle value"]',
+      )?.disabled,
+    ).toBe(true);
+  });
+
   it("does not offer Add fill when another selected layer has a fill to overwrite", async () => {
     const empty = detailsFor({ backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none" }); // check:ui ignore-line -- CSSOM fixture
     const filled = detailsFor(
       { backgroundColor: "#FF0000", backgroundImage: "none" }, // check:ui ignore-line -- authored CSS fixture
       { oid: "filled", authoredStyleProperties: ["background-color"] },
     );
-    await renderEditor(empty, undefined, { layoutParents: [empty, filled], selectionCount: 2 });
+    await renderEditor(empty, undefined, {
+      layoutParents: [empty, filled],
+      selectionCount: 2,
+    });
     expect(document.querySelector('button[aria-label="Add fill"]')).toBeNull();
   });
 
@@ -171,12 +337,21 @@ describe("destructive fill edits", () => {
       { backgroundColor: "rgba(0, 0, 0, 0)", backgroundImage: "none" }, // check:ui ignore-line -- CSSOM fixture
       {
         authoredStyleProperties: ["background-image"],
-        authoredStyles: { "background-image": { origin: "inline", value: "var(--image)" } },
+        authoredStyles: {
+          "background-image": { origin: "inline", value: "var(--image)" },
+        },
       },
     );
     const onCommit = await renderEditor(details);
-    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Add fill"]')!.click());
-    const written = onCommit.mock.calls.at(-1)?.[0] as Record<string, string | null>;
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Add fill"]')!
+        .click(),
+    );
+    const written = onCommit.mock.calls.at(-1)?.[0] as Record<
+      string,
+      string | null
+    >;
     expect(written).not.toHaveProperty("background-image");
   });
 
@@ -185,17 +360,32 @@ describe("destructive fill edits", () => {
     const details = detailsFor(
       {
         backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
-        backgroundImage: "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(135deg, rgb(81, 81, 204) 0%, rgb(20, 122, 76) 100%)", // check:ui ignore-line -- CSSOM fixture
       },
       {
         authoredStyleProperties: ["background-image"],
-        authoredStyles: { "background-image": { origin: "inline", value: authored } },
+        authoredStyles: {
+          "background-image": { origin: "inline", value: authored },
+        },
       },
     );
     await renderEditor(details);
-    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!.click());
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Start stop opacity value"]')?.disabled).toBe(true);
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Gradient angle value"]')?.disabled).toBe(false);
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    expect(
+      document.querySelector<HTMLInputElement>(
+        'input[aria-label="Start stop opacity value"]',
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      document.querySelector<HTMLInputElement>(
+        'input[aria-label="Gradient angle value"]',
+      )?.disabled,
+    ).toBe(false);
   });
 
   it("keeps named gradient stop colours editable", async () => {
@@ -203,16 +393,26 @@ describe("destructive fill edits", () => {
     const details = detailsFor(
       {
         backgroundColor: "rgba(0, 0, 0, 0)", // check:ui ignore-line -- CSSOM fixture
-        backgroundImage: "linear-gradient(135deg, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
+        backgroundImage:
+          "linear-gradient(135deg, rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", // check:ui ignore-line -- CSSOM fixture
       },
       {
         authoredStyleProperties: ["background-image"],
-        authoredStyles: { "background-image": { origin: "inline", value: authored } },
+        authoredStyles: {
+          "background-image": { origin: "inline", value: authored },
+        },
       },
     );
     await renderEditor(details);
-    await act(async () => document.querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!.click());
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Start stop opacity value"]')?.disabled).toBe(false);
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit fill"]')!
+        .click(),
+    );
+    expect(
+      document.querySelector<HTMLInputElement>(
+        'input[aria-label="Start stop opacity value"]',
+      )?.disabled,
+    ).toBe(false);
   });
-
 });
