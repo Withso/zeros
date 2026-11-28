@@ -456,7 +456,7 @@ function DesignZoomMenu({
     return () => cancelAnimationFrame(frame);
   }, [open]);
   const commitDraft = () => {
-    const value = Number.parseFloat(draft);
+    const value = Number.parseFloat(draft.replace(",", "."));
     if (Number.isFinite(value) && value > 0) zoomActionsRef.current?.zoomTo(value / 100);
     setOpen(false);
   };
