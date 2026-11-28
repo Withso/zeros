@@ -75,7 +75,7 @@ export function runGitProbeSync(
 ): string {
   if (!cwd) throw new GitError({ code: "VALIDATION_FAILED", message: "Managed Git probe requires a checkout." });
   try {
-    const processOptions = { env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env, cwd) };
+    const processOptions = { env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env, cwd, args) };
     return execFileSync(engineGitBinary(), ["-c", "core.fsmonitor=false", ...args], {
       cwd,
       encoding: "utf8",
@@ -193,7 +193,7 @@ export async function runFile(
     opts = { ...opts, env: withoutLocalDevelopment(childEnv) };
   }
   if (path.basename(command) === "git") {
-    const env = withWorkspaceCeiling(gitProcessOptions(opts.env).env, opts.cwd);
+    const env = withWorkspaceCeiling(gitProcessOptions(opts.env).env, opts.cwd, args);
     if (command === "git") {
       // Resolve once per effective PATH, excluding broker scripts and aliases.
       // Explicit shim paths (shell/credential tests) keep their path.

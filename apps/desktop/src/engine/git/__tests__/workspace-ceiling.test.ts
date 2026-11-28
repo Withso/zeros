@@ -24,4 +24,13 @@ describe("withWorkspaceCeiling", () => {
     expect(withWorkspaceCeiling({}, "/outer/packages/app").GIT_CEILING_DIRECTORIES).toBeUndefined();
     expect(withWorkspaceCeiling({}).GIT_CEILING_DIRECTORIES).toBeUndefined();
   });
+
+  it("treats a child named like '..notes' as inside the root, and follows leading -C options", () => {
+    const odd = `/outer/zeros${path.delimiter}local/workspaces`;
+    setManagedWorkspaceRootsForTesting([odd]);
+    expect(withWorkspaceCeiling({}, `${odd}/..notes`).GIT_CEILING_DIRECTORIES).toBe("/outer");
+    expect(withWorkspaceCeiling({}, "/elsewhere", ["-C", `${odd}/repo/broken`, "status"]).GIT_CEILING_DIRECTORIES).toBe("/outer");
+    expect(withWorkspaceCeiling({}, `${odd}/repo`, ["-C", "/elsewhere", "status"]).GIT_CEILING_DIRECTORIES).toBeUndefined();
+  });
 });
+

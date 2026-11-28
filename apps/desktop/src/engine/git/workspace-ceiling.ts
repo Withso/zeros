@@ -47,7 +47,8 @@ function canonical(dir: string): string {
 
 function within(dir: string, root: string): boolean {
   const relative = path.relative(canonical(root), canonical(dir));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  // A child named "..notes" is inside; only ".." itself or "../…" leaves.
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 /** Git splits the ceiling list on the path delimiter, so a root that contains
@@ -68,13 +69,30 @@ function ceilingFor(root: string, cwd: string | undefined): string | null {
   return dir;
 }
 
+/** Git applies each leading `-C <dir>` before discovery, so the directory it
+ * searches from is the process cwd resolved through them. */
+export function effectiveGitDirectory(cwd: string | undefined, args: readonly string[]): string | undefined {
+  let dir = cwd;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "-C" && index + 1 < args.length) {
+      const next = args[++index]!;
+      if (next) dir = path.resolve(dir ?? process.cwd(), next);
+    } else if (arg === "-c" || arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace") {
+      index++;
+    } else if (!arg.startsWith("-")) break;
+  }
+  return dir;
+}
+
 /** Git does not chdir up into a ceiling directory during repository
  * discovery, so nothing at or above a managed root can be adopted from inside
  * it. Repositories outside the roots, and healthy checkouts below them, resolve
  * as before. An inherited ceiling list is kept byte for byte after the managed
  * roots: its empty-entry marker only stops symlink resolution for the entries
  * that follow it. `cwd` is the Git call's working directory. */
-export function withWorkspaceCeiling(env: NodeJS.ProcessEnv, cwd?: string): NodeJS.ProcessEnv {
+export function withWorkspaceCeiling(env: NodeJS.ProcessEnv, cwd?: string, args: readonly string[] = []): NodeJS.ProcessEnv {
+  cwd = effectiveGitDirectory(cwd, args);
   const roots = [...new Set(managedWorkspaceRoots().flatMap((root) => {
     const ceiling = ceilingFor(root, cwd);
     return ceiling ? [ceiling] : [];

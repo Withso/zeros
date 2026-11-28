@@ -50,7 +50,7 @@ function git(root: string, args: string[]): string {
       return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
         cwd: root,
         encoding: "utf8",
-        env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env, root),
+        env: withWorkspaceCeiling(gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }).env, root, args),
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 5_000,
       }).trim();
