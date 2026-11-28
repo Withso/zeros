@@ -305,6 +305,8 @@ export class CloudGithubConnectionStore {
     identity: CloudGithubAccount,
     material: CloudGithubCredential,
     checkAuthority?: (tx: Tx) => Promise<void>,
+    /** `select: false` stores the credential and leaves the selected method as it is. */
+    options: { select?: boolean } = {},
   ): Promise<string> {
     if (
       !/^[1-9][0-9]{0,15}$/.test(identity.id) ||
@@ -324,7 +326,7 @@ export class CloudGithubConnectionStore {
         keyVersion: this.keys.currentKeyVersion,
       };
       const envelope = sealGithubCredential(material, seal, this.keys);
-      await this.selection(tx, value.scope, material.method);
+      await this.selection(tx, value.scope, options.select === false ? value.actor.selected_method : material.method);
       await tx.query(
         `INSERT INTO cloud_github_credentials(id,org_id,owner_user_id,method,generation,github_user_id,github_login,
         version,key_version,nonce,ciphertext,auth_tag,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12)
@@ -367,6 +369,12 @@ export class CloudGithubConnectionStore {
       if (!row) throw required();
       assertMethodIdentity(value, method, { id: row.github_user_id, login: row.github_login });
       await this.selection(tx, value.scope, method);
+    });
+  }
+  /** Cloud uses no method until one is selected again; saved credentials stay. */
+  async deselect(scope: CloudGithubConnectionScope, expected: string): Promise<void> {
+    await this.edit(scope, expected, async (tx, value) => {
+      await this.selection(tx, value.scope, null);
     });
   }
   async patSaveGuard(scope: CloudGithubConnectionScope, expected: string) {

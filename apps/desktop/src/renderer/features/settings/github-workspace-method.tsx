@@ -1,5 +1,6 @@
 import type { GithubAuthMethod } from "@zeros/protocol/github-auth";
-import { Cloud, Laptop } from "lucide-react";
+import { Cloud, Laptop, X } from "lucide-react";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../shared/ui/primitives/select";
 import { SettingsRow } from "./settings-ui";
 
@@ -12,7 +13,7 @@ export const workspaceMethodNames = {
 } satisfies Record<GithubAuthMethod, string>;
 
 export function GithubWorkspaceMethod({
-  place, organization, method, hint, disabled, methods, onChoose,
+  place, organization, method, hint, disabled, methods, onChoose, onClear,
 }: {
   place: GithubPlace;
   organization?: string;
@@ -21,6 +22,8 @@ export function GithubWorkspaceMethod({
   disabled: boolean;
   methods: readonly GithubAuthMethod[];
   onChoose(method: GithubAuthMethod): void;
+  /** Stops using GitHub in this place; saved credentials stay. Absent when nothing is in use or it is unsupported. */
+  onClear?: (() => void) | undefined;
 }) {
   const name = place === "local" ? "Local" : "Cloud";
   const Icon = place === "local" ? Laptop : Cloud;
@@ -37,6 +40,11 @@ export function GithubWorkspaceMethod({
           {methods.map(choice => <SelectItem key={choice} value={choice}>{workspaceMethodNames[choice]}</SelectItem>)}
         </SelectContent>
       </Select>
+      {onClear && method && (
+        <IconButton size="standard" disabled={disabled} label={`Stop using GitHub ${place === "local" ? "on this Mac" : "in Cloud"}`} onClick={onClear}>
+          <X aria-hidden />
+        </IconButton>
+      )}
     </SettingsRow>
   );
 }

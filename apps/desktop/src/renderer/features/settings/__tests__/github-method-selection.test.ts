@@ -14,6 +14,7 @@ const adapters = vi.hoisted(() => ({
   cliLogin: "",
   cloudError: false,
   localError: false,
+  workspaceSelection: false,
   patConnect: vi.fn(async () => ({ login: "octocat", snapshot: { selectedMethod: "pat" } })),
   appConnected: new Set<(payload: { login: string; installationCount: number }) => void>(),
   appErrors: new Set<(payload: { reason: string }) => void>(),
@@ -58,8 +59,8 @@ vi.mock("../../../state/use-recovering-read", () => ({
 }));
 vi.mock("../inline-login-terminal", () => ({ InlineLoginTerminal: () => "CLI sign-in terminal" }));
 vi.mock("../use-shared-github", () => ({
-  useSharedGithub: () => ({ change: adapters.cloud, target: () => ({ userId: "a", organizationId: "o", expected: "c".repeat(64) }), read: { readError: adapters.cloudError, data: adapters.hasCloudSnapshot ? {
-    selectedMethod: adapters.cloudMethod, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: adapters.cloudMethod === "github-app" } },
+  useSharedGithub: () => ({ change: adapters.cloud, invalidate: () => {}, target: () => ({ userId: "a", organizationId: "o", expected: "c".repeat(64) }), read: { readError: adapters.cloudError, data: adapters.hasCloudSnapshot ? {
+    selectedMethod: adapters.cloudMethod, workspaceSelection: adapters.workspaceSelection, methods: { pat: { configured: adapters.cloudPatConfigured, login: "octocat" }, "github-app": { configured: adapters.cloudMethod === "github-app" } },
   } : undefined } }),
 }));
 
@@ -71,6 +72,7 @@ beforeEach(() => {
   adapters.empty = false;
   adapters.cloudError = false;
   adapters.localError = false;
+  adapters.workspaceSelection = false;
   adapters.localMethod = "pat";
   adapters.cloudMethod = null;
   adapters.localApp = true;
@@ -425,5 +427,48 @@ it("sets up a missing Cloud App through the shared exchange while preserving Loc
       shared: { userId: "a", organizationId: "o", expected: "c".repeat(64) },
     });
     expect(adapters.mac).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it("saves Cloud's App from a Local-started sign-in without selecting it when the control plane supports it", async () => {
+  adapters.localApp = false;
+  adapters.cloudMethod = "pat";
+  adapters.workspaceSelection = true;
+  const page = await workspacePage(org, "a");
+  try {
+    await page.pick("Local", "GitHub App");
+    const open = [...page.container.querySelectorAll("button")].find(button => button.textContent === "Open GitHub")!;
+    await act(async () => open.click());
+    expect(adapters.connectApp).toHaveBeenCalledWith(expect.objectContaining({
+      shared: { userId: "a", organizationId: "o", expected: "c".repeat(64), keepSelection: true } }));
+    // No renderer-memory restore: the server keeps Cloud's PAT selected.
+    await act(async () => { for (const connected of adapters.appConnected) connected({ login: "octocat", installationCount: 2 }); });
+    expect(adapters.changeAfterSave).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it.each([true, false])("stops using GitHub in Cloud without deleting credentials (supported=%s)", async supported => {
+  adapters.cloudMethod = "pat";
+  adapters.workspaceSelection = supported;
+  const page = await workspacePage(org, "a");
+  try {
+    const clear = page.container.querySelector<HTMLButtonElement>('[aria-label="Stop using GitHub in Cloud"]');
+    if (!supported) { expect(clear).toBeNull(); return; }
+    await act(async () => clear!.click());
+    expect(adapters.cloud).toHaveBeenCalledExactlyOnceWith({ action: "deselect" });
+    expect(adapters.remove).not.toHaveBeenCalled();
+  } finally { page.close(); }
+});
+
+it("stops using GitHub on this Mac by deselecting, not by removing a credential", async () => {
+  adapters.localMethod = "pat";
+  adapters.mac.mockResolvedValueOnce({ selectedMethod: "gh-cli", methods: {} } as never);
+  adapters.remove.mockResolvedValueOnce({ snapshot: { selectedMethod: "gh-cli", methods: {} } } as never);
+  const page = await workspacePage(org, "a");
+  try {
+    await act(async () => page.container.querySelector<HTMLButtonElement>('[aria-label="Stop using GitHub on this Mac"]')!.click());
+    expect(adapters.mac).toHaveBeenCalledExactlyOnceWith("gh-cli", "a");
+    // Only the borrowed CLI is marked unused; the saved PAT and App stay.
+    expect(adapters.remove).toHaveBeenCalledExactlyOnceWith("gh-cli", "a");
   } finally { page.close(); }
 });

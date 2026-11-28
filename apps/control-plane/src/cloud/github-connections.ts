@@ -420,6 +420,7 @@ export class CloudGithubConnections {
       },
       appAvailable: !!this.config,
       sharedDesktopApp: !devConnectionsEnabled(process.env),
+      workspaceSelection: true,
       installUrl: this.config
         ? `${this.config.webBaseUrl}/apps/${encodeURIComponent(this.config.appSlug)}/installations/new`
         : null,

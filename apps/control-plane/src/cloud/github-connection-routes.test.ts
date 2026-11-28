@@ -42,6 +42,7 @@ function fixture() {
     select: vi.fn(async () => {}),
     store: {
       disconnect: vi.fn(async () => {}),
+      deselect: vi.fn(async () => {}),
       cancelOauth: vi.fn(async () => {}),
     },
   };
@@ -144,6 +145,13 @@ describe("cloud GitHub connection HTTP boundary", () => {
       expect(await response.text()).not.toContain("secret-projection-canary");
     },
   );
+
+  it("stops using the Cloud method through the generation-fenced deselect", async () => {
+    const f = fixture();
+    const response = await f.post({ organizationId, expected: generation, action: "deselect" });
+    expect(response.status).toBe(200);
+    expect(f.service.store.deselect).toHaveBeenCalledExactlyOnceWith(f.scope, generation);
+  });
 
   it("rejects supplied identities, invalid generations, extra fields and oversized input before calling services", async () => {
     const f = fixture();

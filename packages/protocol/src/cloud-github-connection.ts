@@ -30,6 +30,8 @@ export const CloudGithubConnectionMutationSchema = z.discriminatedUnion(
       .strict(),
     z.object({ ...scope, action: z.literal("oauth"), install: z.literal(true).optional() }).strict(),
     z.object({ ...scope, action: z.literal("cancel") }).strict(),
+    /** Stops using any method in Cloud; every saved credential stays. */
+    z.object({ ...scope, action: z.literal("deselect") }).strict(),
     z
       .object({
         ...scope,
@@ -55,6 +57,8 @@ export const CloudGithubConnectionStatusSchema = z.object({
   }),
   appAvailable: z.boolean(),
   sharedDesktopApp: z.boolean().optional(),
+  /** Deselect, and a shared App exchange that leaves Cloud's selection alone. */
+  workspaceSelection: z.boolean().optional(),
   installUrl: z.string().url().nullable(),
 });
 function method() {

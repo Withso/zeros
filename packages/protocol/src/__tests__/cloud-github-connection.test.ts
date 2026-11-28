@@ -26,6 +26,8 @@ describe("cloud GitHub connection contract parity", () => {
     [{ ...scope, action: "cancel" }, true],
     [{ ...scope, action: "select", method: "pat" }, true],
     [{ ...scope, action: "disconnect", method: "github-app" }, true],
+    [{ ...scope, action: "deselect" }, true],
+    [{ ...scope, action: "deselect", method: "pat" }, false],
     [{ ...scope, action: "select", method: "gh-cli" }, false],
     [{ ...scope, action: "pat", token: "" }, false],
     [

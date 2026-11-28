@@ -112,6 +112,7 @@ type Action =
   | { action: "pat"; token: string }
   | { action: "oauth"; install?: true }
   | { action: "cancel" }
+  | { action: "deselect" }
   | { action: "select" | "disconnect"; method: CloudGithubMethod };
 async function mutate<T>(
   userId: string,

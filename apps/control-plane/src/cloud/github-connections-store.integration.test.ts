@@ -341,6 +341,27 @@ database("cloud GitHub connection ownership and rotation", () => {
     expect((await store.status(scope())).methods.pat.configured).toBe(false);
   });
 
+  it("stops using a method in Cloud without deleting any credential", async () => {
+    await save();
+    const before = await store.status(scope());
+    expect(before.selectedMethod).toBe("pat");
+    await store.deselect(scope(), before.generation);
+    const after = await store.status(scope());
+    expect(after.selectedMethod).toBeNull();
+    expect(after.methods.pat.configured).toBe(true);
+    expect(after.generation).not.toBe(before.generation);
+    await expect(store.deselect(scope(), before.generation)).rejects.toThrow();
+  });
+
+  it("saves a credential without moving the selection when asked", async () => {
+    await save();
+    const before = await store.status(scope());
+    await store.save(scope(), before.generation, identity, app, undefined, { select: false });
+    const after = await store.status(scope());
+    expect(after.selectedMethod).toBe("pat");
+    expect(after.methods["github-app"].configured).toBe(true);
+  });
+
   it("preserves inactive methods while selecting the explicit connection", async () => {
     await store.save(
       scope(),
