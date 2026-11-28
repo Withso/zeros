@@ -1,0 +1,5 @@
+{
+  "file": "apps/desktop/src/renderer/features/agent/__tests__/chat-selection-popup.test.ts",
+  "before": "      // Starting inside the existing HTML selection drags that selection in Chromium instead of making a new one; choose different text.\n      await select(page, \"#p1\", \"#p1\");",
+  "after": "      await select(page, \"#p2\", \"#p2\");"
+}
