@@ -1499,7 +1499,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     !!appliedInspectorVisual &&
       appliedInspectorVisual.background !== "rgba(0, 0, 0, 0)" &&
       appliedInspectorVisual.borderWidth === "0px" &&
-      appliedInspectorVisual.fontSize === "13px" &&
+      appliedInspectorVisual.fontSize === "12px" &&
       !appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
   );
   const untouchedPaddingTop = page.locator(
