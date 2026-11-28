@@ -124,7 +124,7 @@ describe("designer layout values", () => {
     expect(updates.get("c")?.left).toBeUndefined();
   });
 
-  it("aligns free layers across different parents by selection bounds", () => {
+  it("leaves mixed-parent selections unchanged", () => {
     const first = node({ width: "40px" });
     first.oid = "first";
     first.layout = { ...first.layout!, parentId: "parent-a", x: 10 };
@@ -141,8 +141,28 @@ describe("designer layout values", () => {
       value: "end",
       target: "self",
     });
-    expect(updates.get("first")).toMatchObject({ left: "120px" });
-    expect(updates.get("second")).toBeUndefined();
+    expect(updates.size).toBe(0);
+  });
+
+  it("does not position a static parent when aligning its layers", () => {
+    const first = node({ width: "40px" });
+    first.oid = "first";
+    first.layout = { ...first.layout!, x: 10, parentPosition: "static", isContainingBlock: false };
+    first.box = { ...first.box!, width: 40 };
+    first.rect = { ...first.rect, width: 40 };
+    const second = node({ width: "60px" });
+    second.oid = "second";
+    second.layout = { ...second.layout!, x: 100, parentPosition: "static", isContainingBlock: false };
+    second.box = { ...second.box!, width: 60 };
+    second.rect = { ...second.rect, width: 60 };
+    const updates = designLayoutSelectionUpdates([first, second], {
+      type: "align",
+      axis: "x",
+      value: "end",
+      target: "self",
+    });
+    expect(updates.has("parent")).toBe(false);
+    expect(updates.get("first")).toMatchObject({ left: "150px" });
   });
 
   it("moves block-flow layers when a multi-selection is aligned", () => {

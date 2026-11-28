@@ -130,6 +130,10 @@ describe("child frame insertion", () => {
     });
     expect(html?.html).toContain("background-color:transparent");
     expect(
+      ops.find((op) => op.type === "node.move" && op.nodeId === "selection-group-test"),
+    ).toMatchObject({ beforeId: "b" });
+
+    expect(
       ops.find(
         (op) => op.type === "node.set-styles" && op.nodeId === "b",
       ),

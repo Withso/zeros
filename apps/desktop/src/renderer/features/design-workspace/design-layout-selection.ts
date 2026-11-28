@@ -36,17 +36,18 @@ export function designLayoutSelectionUpdates(
       node.layout?.parentId &&
       !designLayoutPlacedByParent(node),
   );
-  if (selected.length < 2 || !selected[0]?.layout?.parentId) return updates;
+  const parentId = selected[0]?.layout?.parentId;
+  if (
+    selected.length < 2 ||
+    !parentId ||
+    selected.some((node) => node.layout?.parentId !== parentId)
+  )
+    return updates;
   const axis = action.axis;
   const boxes = new Map(
     selected.map((node) => [node.oid, designLayoutChildBounds(node)]),
   );
   const merge = (node: DesignRuntimeNodeDetails, value: number) => {
-    if (node.layout?.parentId && !node.layout.isContainingBlock)
-      updates.set(node.layout.parentId, {
-        ...updates.get(node.layout.parentId),
-        position: updates.get(node.layout.parentId)?.position ?? "relative",
-      });
     const current = node.layout![axis];
     if (Math.round(value) === Math.round(current)) return;
     updates.set(node.oid, {

@@ -138,7 +138,7 @@ export function designWrapSelectionOperations(
       operationId: crypto.randomUUID(),
       nodeId: id,
       parentId: parent.oid,
-      beforeId: nodes[0]!.oid,
+      beforeId: nodes.at(-1)!.oid,
     },
   );
   for (const box of boxes) {
