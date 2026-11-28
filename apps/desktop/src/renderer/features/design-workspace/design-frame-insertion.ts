@@ -137,6 +137,43 @@ export async function designDrawParentAt(runtime: DesignDrawParentRuntime, point
   return parent;
 }
 
+function designChildCoordinateSpaceInverse(
+  parent: DesignRuntimeNodeDetails,
+): { matrix: [number, number, number, number, number, number]; determinant: number } {
+  const matrix = parent.childCoordinateSpace;
+  if (!matrix)
+    throw new Error("The frame's editable coordinates are unavailable.");
+  const [a, b, c, d] = matrix;
+  const determinant = a * d - b * c;
+  if (Math.abs(determinant) < 0.000001)
+    throw new Error("The frame has no drawable area.");
+  return { matrix: matrix as [number, number, number, number, number, number], determinant };
+}
+
+export function designPointInChildCoordinateSpace(
+  parent: DesignRuntimeNodeDetails,
+  point: Point,
+): Point {
+  const { matrix, determinant } = designChildCoordinateSpaceInverse(parent);
+  const [a, b, c, d, e, f] = matrix;
+  return {
+    x: (d * (point.x - e) - c * (point.y - f)) / determinant,
+    y: (-b * (point.x - e) + a * (point.y - f)) / determinant,
+  };
+}
+
+export function designSizeInChildCoordinateSpace(
+  parent: DesignRuntimeNodeDetails,
+  size: Point,
+): Point {
+  const { matrix, determinant } = designChildCoordinateSpaceInverse(parent);
+  const [a, b, c, d] = matrix;
+  return {
+    x: size.x * Math.hypot(d / determinant, b / determinant),
+    y: size.y * Math.hypot(c / determinant, a / determinant),
+  };
+}
+
 /** Insertion remains in the exact parent's coordinates even when the canvas
  * zooms, ancestors rotate/reflect, or the parent scrolls. */
 export function designFrameInsertionOperations(
@@ -163,17 +200,7 @@ export function designFrameInsertion(
   /** The new frame's box in the parent's coordinates. */
   bounds: { x: number; y: number; width: number; height: number };
 } {
-  const matrix = parent.childCoordinateSpace;
-  if (!matrix)
-    throw new Error("The frame's editable coordinates are unavailable.");
-  const [a, b, c, d, e, f] = matrix;
-  const determinant = a * d - b * c;
-  if (Math.abs(determinant) < 0.000001)
-    throw new Error("The frame has no drawable area.");
-  const local = (point: Point) => ({
-    x: (d * (point.x - e) - c * (point.y - f)) / determinant,
-    y: (-b * (point.x - e) + a * (point.y - f)) / determinant,
-  });
+  const local = (point: Point) => designPointInChildCoordinateSpace(parent, point);
   const from = local(start);
   // A click creates the standard size in the parent's own coordinates; a
   // rotated screen-space diagonal must not turn that square into a thin line.

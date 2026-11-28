@@ -41,6 +41,7 @@ import {
 } from "./design-layout-controls";
 import { designLayoutChildrenSummary } from "./design-layout-children";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
+import { parseDesignGradient } from "./design-fill-values";
 import {
   InspectorGlyph,
   InspectorGroup,
@@ -281,6 +282,12 @@ export function DesignStyleEditor({
   const independentCorners = cornersOpen || cornersDiffer;
   const blendMode = styleValue(details, "mix-blend-mode", "normal");
 
+  const fillImage = styleValue(details, "background-image", "none");
+  const authoredFillImage = details.authoredStyles?.["background-image"]?.value;
+  const editableFillImage =
+    authoredFillImage && parseDesignGradient(authoredFillImage)
+      ? authoredFillImage
+      : fillImage;
   const fillProperty = textLayer ? "color" : "background-color";
   const fillToken = useDesignStyleToken(details, fillProperty);
   const confirmedFillColor = styleValue(
@@ -288,13 +295,12 @@ export function DesignStyleEditor({
     fillProperty,
     textLayer ? "currentColor" : "transparent",
   );
-  const fillImage = styleValue(details, "background-image", "none");
   // An added fill is a row at once, as in Figma, while its save lands.
   const [addedFill, setAddedFill] = useState<string | null>(null);
-  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, fillImage);
+  const fillAdding = !textLayer && addedFill === details.oid && designFillIsEmpty(confirmedFillColor, editableFillImage);
   useEffect(() => {
-    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, fillImage))) setAddedFill(null);
-  }, [addedFill, confirmedFillColor, details.oid, fillImage]);
+    if (addedFill && (addedFill !== details.oid || !designFillIsEmpty(confirmedFillColor, editableFillImage))) setAddedFill(null);
+  }, [addedFill, confirmedFillColor, details.oid, editableFillImage]);
   const fillColor = fillAdding ? NEW_FILL_COLOR : confirmedFillColor;
   const selection = layoutParents ?? [details];
   const fillMixed = designStyleMixed(
@@ -309,9 +315,24 @@ export function DesignStyleEditor({
     !fillAdding &&
     !textLayer &&
     !fillMixed &&
-    designFillIsEmpty(fillColor, fillImage) &&
+    designFillIsEmpty(fillColor, editableFillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
+  // Until fills are a true stack, Add appears only where the write cannot
+  // replace an authored or visible solid fill on any selected layer.
+  const fillCanAdd =
+    !textLayer &&
+    selection.every((node) => {
+      const color = styleValue(node, "background-color", "transparent");
+      return (
+        designFillIsEmpty(color, "none") &&
+        !isDesignRuntimeStylePropertyAuthored(
+          node.authoredStyleProperties,
+          "background-color",
+          color,
+        )
+      );
+    });
 
   const transitionDuration = styleValue(details, "transition-duration", "0s");
   const transitionActive =
@@ -559,7 +580,7 @@ export function DesignStyleEditor({
         empty={fillEmpty}
         data-design-fill-section=""
         actions={
-          fillEmpty ? (
+          fillCanAdd ? (
             <>
               <MotionPropertyAction
                 label="fill"
@@ -574,17 +595,13 @@ export function DesignStyleEditor({
                 label="Add fill"
                 disabled={disabled}
                 onClick={() => {
-                  if (!textLayer) {
+                  if (fillEmpty) {
                     requestDesignPaintPicker("background-color");
                     setAddedFill(details.oid);
                   }
-                  void commit(
-                    {
-                      "background-color": NEW_FILL_COLOR,
-                      "background-image": "none",
-                    },
-                    "fill",
-                  ).catch(() => setAddedFill(null));
+                  void commit({ "background-color": NEW_FILL_COLOR }, "fill").catch(() =>
+                    setAddedFill(null),
+                  );
                 }}
               >
                 <Plus />
@@ -617,6 +634,7 @@ export function DesignStyleEditor({
             <DesignFillEditor
               color={fillColor}
               image={fillImage}
+              editableImage={editableFillImage}
               {...fillToken}
               position={styleValue(details, "background-position", "0% 0%")}
               size={styleValue(details, "background-size", "auto")}

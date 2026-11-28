@@ -3916,7 +3916,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const exportSection =
     frame && folder && (frameSelected || selectedNodeId) ? (
       <InspectorSection title="Export" data-design-export-section="">
-        <Button type="button" variant="secondary" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
+        <Button type="button" variant="secondary" size="compact" className="w-full" disabled={openingPreview || !active || !previewAllowed} onClick={() => void openPreview()}>
           <ExternalLink /> Open preview
         </Button>
         <div className="grid grid-cols-[76px_minmax(0,1fr)] gap-2">
@@ -3933,6 +3933,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           <Button
             type="button"
             variant="secondary"
+            size="compact"
             className="w-full"
             disabled={frameAction !== null}
             aria-label="Export PNG"

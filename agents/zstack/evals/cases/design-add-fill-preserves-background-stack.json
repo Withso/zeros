@@ -1,0 +1,9 @@
+{
+  "id": "design-add-fill-preserves-background-stack",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1340",
+  "symptom": "Adding a fill to a layer with an authored gradient and image background wrote background-image:none, discarding the existing painted stack.",
+  "rule": "Fill creation must not clear an existing background-image. Until fills are a true editable stack, only offer Add where the solid colour write cannot replace an authored or visible fill.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-fill-destructive-edits.test.ts -t 'adds a fill on a layer with a gradient and image stack without discarding it'"
+}
