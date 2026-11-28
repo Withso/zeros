@@ -70,6 +70,7 @@ import {
   TabsTrigger,
   Tooltip,
   toast,
+  usePopoverOpenControl,
 } from "../../shared/ui/primitives";
 import {
   dispatchFocusedDesignHistory,
@@ -420,6 +421,15 @@ export function designStyleTargetNodeId({
     (details && details.oid === layoutRootId ? details.oid : null);
 }
 
+function inspectorCanvasViewport(from: Element): HTMLElement | null {
+  return (from.closest("[data-design-workspace-surface]") ?? document.querySelector("[data-design-workspace-surface]:not([inert])"))
+    ?.querySelector<HTMLElement>("[data-design-canvas-viewport]") ?? null;
+}
+
+function focusInspectorCanvasViewport(from: Element): void {
+  inspectorCanvasViewport(from)?.focus({ preventScroll: true });
+}
+
 export function InspectorEditField({
   numericValue,
   icon,
@@ -465,6 +475,7 @@ export function InspectorEditField({
   const [typingOverToken, setTypingOverToken] = useState(false);
   const tokensOffered = useDesignTokensFor(tokenAccepts);
   const overlays = useDesignFieldOverlays();
+  const setPopoverOpen = usePopoverOpenControl();
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const pillRef = useRef<HTMLButtonElement | null>(null);
@@ -1032,7 +1043,11 @@ export function InspectorEditField({
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              void commit();
+              // Fields inside a popover keep it open, like the unit menu beside them.
+              if (input.closest("[data-design-popover]")) input.blur();
+              else focusInspectorCanvasViewport(input);
             } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
               event.preventDefault();
               const current = mixedStepsRef.current ?? { steps: 0, fine: false };
@@ -1102,7 +1117,14 @@ export function InspectorEditField({
                 mixedStepsRef.current = null;
                 mixedSteps?.cancel();
               }
-              event.currentTarget.blur();
+              const input = event.currentTarget;
+              if (setPopoverOpen && input.closest("[data-design-popover]")) {
+                setPopoverOpen(false);
+                return;
+              }
+              const viewport = inspectorCanvasViewport(input);
+              input.blur();
+              window.requestAnimationFrame(() => viewport?.focus({ preventScroll: true }));
             }
           }}
         />
@@ -1184,7 +1206,7 @@ export function InspectorEditField({
             >
               <SelectValue />
             </SelectTrigger>
-            <SelectContent align="end" className="min-w-20">
+            <SelectContent align="end" data-design-popover="" className="min-w-20">
               {unitOptions.map((unit) => (
                 <SelectItem key={unit} value={unit}>
                   {unit}

@@ -61,6 +61,7 @@ import {
   type DesignFrameGeometryWire,
 } from "../../platform/git";
 import { cn } from "../../shared/ui/cn";
+import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import {
   DesignCanvasItemsLayer,
   DesignCanvasItemsLimitNotice,
@@ -189,6 +190,7 @@ import {
   designLayerTopLevelSelectionIds,
   flattenDesignLayerTree,
 } from "./design-layer-tree";
+import { layerRowKey } from "./design-layer-panel-rows";
 import { startDesignLayoutDrag } from "./design-layout-drag-gesture";
 import { designFrameCopyGeometry, presentDesignFrameCopy, startDesignFrameCopy } from "./design-frame-copy-gesture";
 import { handDesignSelectionPresentation } from "./state/design-selection-handoff";
@@ -593,6 +595,10 @@ const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsW
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
   return <article {...props} ref={ref} />;
 });
+
+const DESIGN_SURFACE_SELECTOR = "[data-design-workspace-surface]";
+const DESIGN_FOCUS_OWNER_SELECTOR =
+  `${DESIGN_SURFACE_SELECTOR}, [data-design-popover]`;
 
 export const DesignCanvas = React.memo(function DesignCanvas({
   workspaceId,
@@ -2928,7 +2934,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (gestureCancelRef.current) return true;
       const selection = designWorkspaceView(workspaceId);
       if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) return true;
-      if (nudgeCommitRef.current || queuedNudgeRef.current) {
+      if (nudgeCommitRef.current || queuedNudgeRef.current || pendingEdits) {
         const previous = queuedNudgeRef.current;
         const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
           owner: captureDesignPageOwner(workspaceId), frame: selectedFrame.file,
@@ -3039,6 +3045,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       selectedNodeDetailsList,
       selectedRuntimeTree,
       nudgeSelectedFrames,
+      pendingEdits,
       workspaceId,
     ],
   );
@@ -3199,17 +3206,28 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const selection = designWorkspaceView(workspaceId);
     if (!active || !isCurrentDesignPageOwner(queued.owner) || queued.lifetime !== nudgeLifetimeRef.current ||
       queued.selectionEvent !== selection.selectionEvent || queued.theme !== selection.activeTheme ||
-      !queued.sourceVersion || selectedFrame?.file !== queued.frame || selectedFrame.sourceVersion !== queued.sourceVersion) {
+      selectedFrame?.file !== queued.frame) {
       queuedNudgeRef.current = null;
       return;
     }
+    const confirmed = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((frame) => frame.file === queued.frame);
+    if (!confirmed) return;
+    if (!queued.sourceVersion) {
+      if (pendingEdits || selectedFrame.sourceVersion !== confirmed.sourceVersion) return;
+      queued.sourceVersion = confirmed.sourceVersion;
+    }
+    if (confirmed.sourceVersion !== queued.sourceVersion) {
+      queuedNudgeRef.current = null;
+      return;
+    }
+    if (selectedFrame.sourceVersion !== queued.sourceVersion) return;
     if (!queued.frames && (designFrameRuntime(workspaceId, queued.frame)?.sourceVersion !== queued.sourceVersion ||
       (selection.selectedTargets.some((target) => target.nodeId) &&
         selection.selectedTargets.some((target) => target.nodeId && !selectedNodeDetailsList.some((details) => details.oid === target.nodeId && details.sourceVersion === queued.sourceVersion))))) return;
     queuedNudgeRef.current = null;
     nudgeSelectedNode(queued.dx, queued.dy);
     if (queued.released) finishNodeNudge();
-  }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, nudgeSelectedNode, finishNodeNudge]);
+  }, [active, workspaceId, nudgeCommitVersion, selectedFrame, selectedNodeDetailsList, pendingEdits, nudgeSelectedNode, finishNodeNudge]);
 
   /** Move/resize previews paint one node; release publishes one engine write. */
   /** Several selected frames follow the pointer together, snap as one box
@@ -6426,12 +6444,45 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     appearance: Promise<DesignRuntimeNodeDetails | null>;
     component: ReturnType<typeof captureDesignFrameComponentCopy>;
   } | null>(null);
+  /** Whether focus was last owned inside this visible surface, and whether a
+   * panel control gained that focus by pointer rather than keyboard. */
+  const designFocusOwnerRef = useRef(false);
+  useEffect(() => {
+    if (!active) return;
+    const pointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
+      const segment = event.target.closest<HTMLElement>(".zd-segment");
+      if (segment) segment.dataset.designPointerFocus = "";
+      designFocusOwnerRef.current = inSurface;
+    };
+    const focusIn = (event: FocusEvent) => {
+      if (!(event.target instanceof Element) || event.target === document.body) return;
+      const inSurface = Boolean(event.target.closest(DESIGN_FOCUS_OWNER_SELECTOR));
+      if (event.target instanceof HTMLElement && event.target.classList.contains("zd-segment") && getLastInputModality() === "keyboard")
+        delete event.target.dataset.designPointerFocus;
+      designFocusOwnerRef.current = inSurface;
+    };
+    document.addEventListener("pointerdown", pointerDown, true);
+    document.addEventListener("focusin", focusIn, true);
+    return () => {
+      document.removeEventListener("pointerdown", pointerDown, true);
+      document.removeEventListener("focusin", focusIn, true);
+    };
+  }, [active]);
   useEffect(() => {
     if (!active || !workspaceId || !folder) return;
     const mime = "application/x-zeros-design-selection";
-    const owns = (event: ClipboardEvent) => !gestureCancelRef.current && !event.defaultPrevented &&
-      !isEditableHotkeyTarget(event.target) && document.activeElement?.closest("[data-design-workspace-surface]") &&
-      !window.getSelection()?.toString();
+    const owns = (event: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      const surfaceFocused =
+        activeElement instanceof Element &&
+        (activeElement.closest(DESIGN_SURFACE_SELECTOR) ||
+          (activeElement === document.body && designFocusOwnerRef.current));
+      return !gestureCancelRef.current && !event.defaultPrevented &&
+        !isEditableHotkeyTarget(event.target) && surfaceFocused &&
+        !window.getSelection()?.toString();
+    };
     const copy = (event: ClipboardEvent) => {
       if (!owns(event) || !event.clipboardData) return;
       const view = designWorkspaceView(workspaceId);
@@ -6561,9 +6612,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         syncStructureModifier(designStructureModifierPressed(event));
       }
       const activeElement = document.activeElement;
+      // A committed field can blur all the way to BODY. With no other focus
+      // owner, the visible design surface still owns its canvas shortcuts.
       const designSurfaceFocused =
         activeElement instanceof Element &&
-        Boolean(activeElement.closest("[data-design-workspace-surface]"));
+        (Boolean(activeElement.closest(DESIGN_SURFACE_SELECTOR)) ||
+          (activeElement === document.body && designFocusOwnerRef.current));
       const shortcutView = designWorkspaceView(workspaceId);
       const shortcutFrame = workspaceId ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find(frame => frame.file === shortcutView.selectedFrame) : undefined;
       const selectedNodeIsTarget = Boolean(shortcutFrame && shortcutView.selectedNodeId);
@@ -6699,7 +6753,39 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         return;
       }
       if (editableTarget) return;
-      if (!viewport.contains(document.activeElement)) return;
+      const arrowShortcut =
+        ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey;
+      const escapeShortcut = event.key === "Escape";
+      const toolShortcut =
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        (["v", "t", "f", "a"].includes(event.key.toLowerCase()) || event.code === "KeyR");
+      const panelControlKeepsArrows =
+        event.target instanceof Element &&
+        event.target.closest('[data-design-panel-resize], [role="separator"]');
+      const keyboardTreeFocus =
+        activeElement instanceof HTMLElement &&
+        Boolean(activeElement.closest("[data-design-frame-row], [data-design-layer-id]")) &&
+        activeElement.dataset.designPointerFocus === undefined;
+      const keyboardSegmentFocus =
+        activeElement instanceof HTMLElement &&
+        activeElement.classList.contains("zd-segment") &&
+        activeElement.dataset.designPointerFocus === undefined;
+      // Panel controls keep focus for their rings and for Tab/Escape, while
+      // canvas-owned tool and nudge keys still act without a click back.
+      // Keyboard-focused Layers rows keep every tree arrow, including edges
+      // the tree itself cannot move past.
+      const panelShortcutFocus =
+        designSurfaceFocused &&
+        (arrowShortcut || toolShortcut || escapeShortcut) &&
+        !panelControlKeepsArrows &&
+        !(arrowShortcut && (keyboardTreeFocus || (keyboardSegmentFocus && !event.shiftKey)));
+      if (!viewport.contains(document.activeElement) && !panelShortcutFocus) return;
       if (event.key === "Escape" && (nudgeGestureRef.current || queuedNudgeRef.current)) {
         event.preventDefault();
         finishNodeNudge(true);
@@ -6767,13 +6853,27 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const parentId = isDesignComponentPartNodeId(view.selectedNodeId)
           ? designComponentPartHost(view.selectedNodeId)
           : designLayerParentId(selectedNavigationTree, view.selectedNodeId);
-        if (parentId) navigateToNode(parentId);
-        else {
+        if (parentId) {
+          navigateToNode(parentId);
+          if (keyboardTreeFocus) {
+            const focusParentRow = () => {
+              const row = document.querySelector<HTMLElement>(`[data-design-panel-row="${CSS.escape(layerRowKey(selectedFrame.file, parentId))}"]`);
+              row?.focus({ preventScroll: true });
+              return row !== null;
+            };
+            window.requestAnimationFrame(() => {
+              if (focusParentRow()) return;
+              window.requestAnimationFrame(() => focusParentRow());
+            });
+          }
+        } else {
           void selectDesignFrame(workspaceId!, selectedFrame, {
             selected: true,
             reveal: true,
           });
         }
+        if (!viewport.contains(document.activeElement) && !keyboardTreeFocus)
+          viewport.focus({ preventScroll: true });
         return;
       }
       if (event.key === "Escape" && view.frameSelected && selectedDescription) {
