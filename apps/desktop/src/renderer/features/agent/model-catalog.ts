@@ -804,6 +804,24 @@ export function permissionMenuItems(
     }));
 }
 
+/** The toggle's shown mode and the mode a click moves to. A Codex mode the
+ *  session no longer offers (blocked by managed policy) is shown as itself,
+ *  never as a looser offered one; clicking then moves to the first offered. */
+export function permissionToggleState(
+  agentId: string | null,
+  items: readonly PermissionMenuItem[],
+  currentModeId: string | null | undefined,
+): { current: PermissionMenuItem; next: PermissionMenuItem } {
+  const idx = items.findIndex((item) => item.modeId === currentModeId);
+  if (idx >= 0) return { current: items[idx]!, next: items[(idx + 1) % items.length]! };
+  const fam = agentFamily(agentId);
+  if (fam === "codex" && currentModeId) {
+    const label = currentModeId === "read-only" ? "Plan" : PERMISSION_MODE_LABELS[fam]?.[currentModeId] ?? currentModeId;
+    return { current: { modeId: currentModeId, label }, next: items[0]! };
+  }
+  return { current: items[0]!, next: items[1 % items.length]! };
+}
+
 /** Whether the permission toggle renders: we have a native-mode vocabulary. */
 export function agentHasPermissionMenu(
   agentId: string | null,

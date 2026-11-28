@@ -456,9 +456,11 @@ export class Agents {
             throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
           // Some providers apply modes on the next turn. A changed selection
           // invalidates the running turn's match instead of relabelling it.
+          const runningMode = route.activePermissionMode;
           if (route.activePermissionMode !== mode) route.activePermissionMode = undefined;
           const revision = route.modeRevision = (route.modeRevision ?? 0) + 1;
-          // Awaited so a refused setMode reaches the AGENT_ERROR reply below.
+          // Awaited so a refused setMode reaches the AGENT_ERROR reply below. A
+          // refusal changed nothing: the running turn keeps its mode for steering.
           return await this.withModeChange(route, async () => {
             if (!this.idle(route)) {
               await this.ensureDriver(route); this.assertCurrent(route);
@@ -472,6 +474,10 @@ export class Agents {
             await this.update(route, { sessionId: route.id, update: { sessionUpdate: "current_mode_update", currentModeId: message.modeId } });
             await client.send(createMessage({ type: "AGENT_MODE_CHANGED", source: "engine", requestId: message.id, agentId: route.agentId,
               sessionId: route.id, executionId: route.id, modeId: message.modeId }));
+          }).catch((error: unknown) => {
+            if (route.modeRevision === revision && route.nativeRunning && route.activePermissionMode === undefined)
+              route.activePermissionMode = runningMode;
+            throw error;
           });
         }
         case "AGENT_SET_MODEL": {

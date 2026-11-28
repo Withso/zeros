@@ -572,6 +572,30 @@ it("runs and records the bounded mode for frozen modes managed Codex policy bloc
   expect(JSON.stringify(relay.response(mode.id))).toContain("organization's Codex policy");
 });
 
+it("keeps steering into the running turn after a mode switch managed policy refuses", async () => {
+  const relay = new PullRelay(), first = delivery(), driver = new FakeDriver();
+  Object.assign(first.payload, { permissionMode: "bypass" }); relay.enqueue({ prompts: [first], stops: [] });
+  const apply = driver.setMode.bind(driver);
+  vi.spyOn(driver, "setMode").mockImplementation(async mode => {
+    if (mode === "read-only") throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow the \"read-only\" permission mode.");
+    return apply(mode);
+  });
+  const f = await setup({ relay, driver, interactions: true });
+  await until(() => driver.prompts.length).toBe(1);
+  const executionId = (await persisted(f.directory))[0].executionId;
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  const mode = browserFrame("AGENT_SET_MODE", { agentId: "codex", chatId: "chat", executionId, sessionId: executionId, modeId: "read-only" });
+  await relay.request(CLIENT_A, mode);
+  expect(relay.response(mode.id)).toMatchObject({ type: "AGENT_ERROR" });
+  // The refused switch changed nothing, so a Full-access follow-up still steers.
+  const second = delivery(randomUUID(), "chat", "0", "2");
+  Object.assign(second.payload, { mode: "steer", permissionMode: "bypass" });
+  relay.enqueue({ prompts: [second], stops: [] });
+  await until(() => driver.steers.length).toBe(1);
+  expect(driver.prompts).toHaveLength(1);
+  driver.complete();
+});
+
 it("refuses an explicit persisted Plan prompt when interactions were not negotiated", async () => {
   const relay = new PullRelay(), item = delivery();
   Object.assign(item.payload, { permissionMode: "plan" }); relay.enqueue({ prompts: [item], stops: [] });

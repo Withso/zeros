@@ -28,6 +28,7 @@ import {
   configuredModelLabelParts,
   effortLabel,
   permissionMenuItems,
+  permissionToggleState,
   resolveModelOption,
 } from "./model-catalog";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
@@ -463,10 +464,7 @@ export function PermissionToggle({
   // below every hook because a chat can switch between supported agents.
   if (items.length === 0) return null;
 
-  let idx = items.findIndex((i) => i.modeId === currentModeId);
-  if (idx < 0) idx = 0;
-  const current = items[idx];
-  const next = items[(idx + 1) % items.length];
+  const { current, next } = permissionToggleState(agentId, items, currentModeId);
   const Icon =
     PERMISSION_MODE_ICONS[agentFamily(agentId)]?.[current.modeId] ?? Shield;
   const dropIn =
