@@ -340,6 +340,12 @@ export function SidebarWorkspaceRow({
     : lead === "folder" || !project ? <Folder className="size-3.5" strokeWidth={1.25} />
     : <WorkspaceProjectIcon project={project} />;
   const parentToggle = childCount > 0 && onToggleChildren && !archiving;
+  // A parent's lead sits inside its child toggle, which is named for the
+  // toggle; its loader or dot is announced beside it (Compact has no word).
+  const leadAnnouncement =
+    lead === "working" ? (activity === "waiting" ? "Waiting for background tasks" : "Agent working")
+    : lead === "status-dot" ? statusDotLabel ?? null
+    : null;
   const projectName = showProjectName && twoLine ? (workspace.project?.name ?? project?.name ?? null) : null;
   // unified-workspaces lists Local and cloud rows together. Compact rows carry
   // the placement beside the name; two-line rows on line 2.
@@ -471,6 +477,9 @@ export function SidebarWorkspaceRow({
             <span className={GLYPH_BOX_CLS} aria-hidden={(lead === "idle-dot" || lead === "folder" || lead === "design") || undefined} data-sidebar-lead={lead}>
               {leadMark}
             </span>
+          )}
+          {parentToggle && leadAnnouncement && (
+            <span className="sr-only" role="status">{leadAnnouncement}</span>
           )}
         </ActivityScope.Provider>
         <span className={twoLine ? "flex min-w-0 flex-1 flex-col gap-0.5" : "contents"}>

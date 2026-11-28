@@ -519,3 +519,12 @@ describe("sidebar pointer ownership", () => {
     expect(ROW).toContain('<span className={compact && pulls.length > 0 ? COMPACT_PR_END_CLS : "contents"}>');
   });
 });
+
+describe("sidebar row lead semantics", () => {
+  // A parent's lead sits inside its child toggle, whose own label names the
+  // toggle; the loader or dot it carries is announced beside it instead.
+  it("announces a parent row's loader or dot outside its child toggle", () => {
+    expect(ROW).toContain("const leadAnnouncement =");
+    expect(ROW).toMatch(/\{parentToggle && leadAnnouncement && \(\s*<span className="sr-only" role="status">\{leadAnnouncement\}<\/span>/);
+  });
+});

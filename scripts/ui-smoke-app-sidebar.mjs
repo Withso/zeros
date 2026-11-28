@@ -272,12 +272,17 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await expect(page.getByRole("menu")).toHaveCount(0);
   await expect.poll(async () => (await state()).page).toBe("repo");
   expect((await state()).folder).toBe(before.folder);
+  // Pointer entry and focus inside the portalled menu must not have scheduled
+  // the row's hover card: with the pointer parked, none opens after its delay.
+  await moveAway();
+  await page.waitForTimeout(700);
+  await expect(page.locator("[data-workspace-preview]")).toHaveCount(0);
   await row("ws-atlanta")
     .getByRole("button", { name: /^Open workspace atlanta/ })
     .click();
   await expect.poll(async () => (await state()).page).toBe("workspace");
   await selectFilter("Repository");
-  check("Repository Settings from a row's logo opens the repository page, not the workspace", true);
+  check("Repository Settings from a row's logo opens the repository page, not the workspace, and leaves its hover card closed", true);
 
   const zerosToggle = zeros.getByRole("button", { name: /^Zeros, \d+$/ });
   await zerosToggle.click();
