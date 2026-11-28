@@ -7,3 +7,10 @@ export function composerDesignModeAvailable(input: {
 }): boolean {
   return Boolean(input.chatId && input.bridge && !isCloudWorkspace(input.workspaceId));
 }
+
+export function shouldFocusComposerForDesignActivation(
+  activeElement: Element | null,
+  composerRoot: Element | null,
+): boolean {
+  return !composerRoot?.contains(activeElement);
+}

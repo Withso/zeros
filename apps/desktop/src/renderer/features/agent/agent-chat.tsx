@@ -139,7 +139,7 @@ import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-f
 import { prepareDesignFrameAttachments } from "./design-frame-attachment";
 import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
 import { setComposerMode } from "./composer-mode";
-import { composerDesignModeAvailable } from "./composer-design-mode";
+import { composerDesignModeAvailable, shouldFocusComposerForDesignActivation } from "./composer-design-mode";
 import { permissionModesAvailable, turnCheckpointsAvailable } from "./chat-feature-availability";
 import { trackCloudChatMutation } from "./cloud-chat-mutation";
 import {
@@ -905,7 +905,7 @@ function AgentChatBody({
   const enterDesignMode = useCallback(() => changeComposerMode("design"), [changeComposerMode]);
   const leaveDesignMode = useCallback(() => changeComposerMode("code"), [changeComposerMode]);
   const activateDesignMode = useCallback(() => {
-    composerFocusRef.current();
+    if (shouldFocusComposerForDesignActivation(document.activeElement, composerCardRef.current)) composerFocusRef.current();
     enterDesignMode();
   }, [enterDesignMode]);
   const designFrameContext = useComposerDesignFrame({
