@@ -77,8 +77,8 @@ importers:
         specifier: ^6.43.1
         version: 6.43.1
       '@cursor/sdk':
-        specifier: 1.5.1
-        version: 1.5.1(zod@4.6.7)
+        specifier: 1.5.2
+        version: 1.5.2(zod@4.6.7)
       '@decimalturn/toml-patch':
         specifier: ^2.0.0
         version: 2.0.0
@@ -917,8 +917,8 @@ packages:
     os: [darwin]
     hasBin: true
 
-  '@cursor/sdk-darwin-arm64@1.5.1':
-    resolution: {integrity: sha512-FQggo69sZR7YDOcHBqjfLyi4N1WTnWcKVVfatqbIM1L4Rohxk/m0Ha7hhzwsBG02je13zzY0iEj+WkuiCDtlsw==}
+  '@cursor/sdk-darwin-arm64@1.5.2':
+    resolution: {integrity: sha512-j5ffFDbpJeM0Ea4JFOU5TJFMlj6EpB1yXh/POMXvyh4z4VscPQao2rc/nbhHKZg9B0CcqKtW682FiK/gvjIklQ==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
@@ -929,8 +929,8 @@ packages:
     os: [darwin]
     hasBin: true
 
-  '@cursor/sdk-darwin-x64@1.5.1':
-    resolution: {integrity: sha512-Kjbq1PadiZTcMsEW0Ypczt+ccB4VbwLe4qIl1Z6rsKs2nlQI/pVX1n9P6IQejimDZF3/S2xEbnVE2X82UNxFqQ==}
+  '@cursor/sdk-darwin-x64@1.5.2':
+    resolution: {integrity: sha512-OWRw1ya6bjasiVhLNfbiCHpD6UUciJTUSvKZuuDAuZo8RpjiFqD9VhaA4TwjqdMVZIgwMTkXWQhn3ZxfZsVupQ==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
@@ -941,8 +941,8 @@ packages:
     os: [linux]
     hasBin: true
 
-  '@cursor/sdk-linux-arm64@1.5.1':
-    resolution: {integrity: sha512-DDNHl/M52qK7cfrnJGtV3Tjdov1YcEHyiMJrx32v77x7ZruIIlyEDWdDHiKi25GSvnfaxz33Z0DA4TpWFlnwhg==}
+  '@cursor/sdk-linux-arm64@1.5.2':
+    resolution: {integrity: sha512-ggM4g82XAlxqBo6v8BMAn+WsSNlb4Fx5+iUAZ5fUPe2Nvv+NXMqL/eQtX8is/L8muYwYlILVf8BRxD01T9bN1g==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
@@ -953,8 +953,8 @@ packages:
     os: [linux]
     hasBin: true
 
-  '@cursor/sdk-linux-x64@1.5.1':
-    resolution: {integrity: sha512-4Cl8EiNnM05ZUvb7Pfw+27P4JbVmpe6zm1h1EV+I+PTLlpa3mtEizvbuAW7huel4BbijUBypWkPbBZJtH5oshw==}
+  '@cursor/sdk-linux-x64@1.5.2':
+    resolution: {integrity: sha512-XdOFdMUuKQptHiPbhxMJ0fApoAiByqvt/kaTxLZ0fllWVv6XBY3AH4mTq5doyn/PZlUmMqsvP0xeMusUmn5/5w==}
     cpu: [x64]
     os: [linux]
     hasBin: true
@@ -965,8 +965,8 @@ packages:
     os: [win32]
     hasBin: true
 
-  '@cursor/sdk-win32-x64@1.5.1':
-    resolution: {integrity: sha512-XD7DJ54CoYJG1Zg584A5jlEhmz61xZ2piOrjY8zIPbuj8ycmi+msQkTAE8vx3m/OCuzmj+Hc83ZOPmVPCugnhQ==}
+  '@cursor/sdk-win32-x64@1.5.2':
+    resolution: {integrity: sha512-rA1i+VxKkiUn80jKJRqmEpTOURxcP6R9seksjPO2OSD1KYxuLTRf0k3of6anIeNKrrTNP1bVO8L1t5ku5szaDg==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -977,8 +977,8 @@ packages:
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
-  '@cursor/sdk@1.5.1':
-    resolution: {integrity: sha512-7tHi9IYmp7jaAK3pPmeBZlQ5kcNA9sLIGLVLz7KF2f3KYRJw7lkZD3IhID/chQic7CuqnKtoQrPcW7cQV4GPZQ==}
+  '@cursor/sdk@1.5.2':
+    resolution: {integrity: sha512-cJVKICD9Rj+WeBt/bZ7+6j4UnkRFHFOXDQHoQLgaF8PU1ybneJBYizSSU6dCvob9RwoXTFGEAfWjBSxXKdRDxQ==}
     engines: {node: '>=22.13'}
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -7241,31 +7241,31 @@ snapshots:
   '@cursor/sdk-darwin-arm64@1.2.0':
     optional: true
 
-  '@cursor/sdk-darwin-arm64@1.5.1':
+  '@cursor/sdk-darwin-arm64@1.5.2':
     optional: true
 
   '@cursor/sdk-darwin-x64@1.2.0':
     optional: true
 
-  '@cursor/sdk-darwin-x64@1.5.1':
+  '@cursor/sdk-darwin-x64@1.5.2':
     optional: true
 
   '@cursor/sdk-linux-arm64@1.2.0':
     optional: true
 
-  '@cursor/sdk-linux-arm64@1.5.1':
+  '@cursor/sdk-linux-arm64@1.5.2':
     optional: true
 
   '@cursor/sdk-linux-x64@1.2.0':
     optional: true
 
-  '@cursor/sdk-linux-x64@1.5.1':
+  '@cursor/sdk-linux-x64@1.5.2':
     optional: true
 
   '@cursor/sdk-win32-x64@1.2.0':
     optional: true
 
-  '@cursor/sdk-win32-x64@1.5.1':
+  '@cursor/sdk-win32-x64@1.5.2':
     optional: true
 
   '@cursor/sdk@1.2.0(zod@4.6.7)':
@@ -7282,19 +7282,16 @@ snapshots:
       '@cursor/sdk-linux-x64': 1.2.0
       '@cursor/sdk-win32-x64': 1.2.0
 
-  '@cursor/sdk@1.5.1(zod@4.6.7)':
+  '@cursor/sdk@1.5.2(zod@4.6.7)':
     dependencies:
-      '@bufbuild/protobuf': 1.10.0
-      '@connectrpc/connect': 1.7.0(@bufbuild/protobuf@1.10.0)
-      '@connectrpc/connect-web': 1.7.0(@bufbuild/protobuf@1.10.0)(@connectrpc/connect@1.7.0(@bufbuild/protobuf@1.10.0))
       '@statsig/js-client': 3.31.0
       zod: 4.6.7
     optionalDependencies:
-      '@cursor/sdk-darwin-arm64': 1.5.1
-      '@cursor/sdk-darwin-x64': 1.5.1
-      '@cursor/sdk-linux-arm64': 1.5.1
-      '@cursor/sdk-linux-x64': 1.5.1
-      '@cursor/sdk-win32-x64': 1.5.1
+      '@cursor/sdk-darwin-arm64': 1.5.2
+      '@cursor/sdk-darwin-x64': 1.5.2
+      '@cursor/sdk-linux-arm64': 1.5.2
+      '@cursor/sdk-linux-x64': 1.5.2
+      '@cursor/sdk-win32-x64': 1.5.2
 
   '@decimalturn/toml-patch@2.0.0': {}
 
