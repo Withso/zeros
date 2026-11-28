@@ -450,11 +450,18 @@ export class Agents {
           if (this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
           const mode = cloudPermissionMode(route.agentId, message.modeId);
           if (!mode) throw new WorkspaceError("invalid-params", "Choose Plan or Full access for a cloud workspace.");
+          // Between turns nothing else checks the choice, so an open driver's
+          // managed policy does. A busy route's ensured driver refuses in setMode.
+          if (this.idle(route) && route.driver?.effectiveMode && route.driver.effectiveMode(message.modeId) !== message.modeId)
+            throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
           // Some providers apply modes on the next turn. A changed selection
           // invalidates the running turn's match instead of relabelling it.
+          const runningMode = route.activePermissionMode;
           if (route.activePermissionMode !== mode) route.activePermissionMode = undefined;
           const revision = route.modeRevision = (route.modeRevision ?? 0) + 1;
-          return this.withModeChange(route, async () => {
+          // Awaited so a refused setMode reaches the AGENT_ERROR reply below. A
+          // refusal changed nothing: the running turn keeps its mode for steering.
+          return await this.withModeChange(route, async () => {
             if (!this.idle(route)) {
               await this.ensureDriver(route); this.assertCurrent(route);
               if (route.modeRevision !== revision) return;
@@ -467,6 +474,14 @@ export class Agents {
             await this.update(route, { sessionId: route.id, update: { sessionUpdate: "current_mode_update", currentModeId: message.modeId } });
             await client.send(createMessage({ type: "AGENT_MODE_CHANGED", source: "engine", requestId: message.id, agentId: route.agentId,
               sessionId: route.id, executionId: route.id, modeId: message.modeId }));
+          }).catch((error: unknown) => {
+            if (route.modeRevision === revision && route.nativeRunning && route.activePermissionMode === undefined) {
+              route.activePermissionMode = runningMode;
+              // A follow-up that arrived while the switch was pending could not
+              // steer then; let it steer into the running turn now.
+              this.resumeOutbox(route.chatId);
+            }
+            throw error;
           });
         }
         case "AGENT_SET_MODEL": {
@@ -1141,9 +1156,15 @@ export class Agents {
                   if (!route.closed && stopping === route.stopping && mode !== undefined) {
                     if (mode === "plan" && this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet.");
                     if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
-                    await route.driver!.setMode(cloudModeId(route.agentId, mode));
+                    // Managed policy may bound the frozen mode to a stricter one.
+                    // Apply and record the mode the turn really runs in, so
+                    // steering matches follow-ups against it.
+                    const requested = cloudModeId(route.agentId, mode);
+                    const effective = route.driver!.effectiveMode ? route.driver!.effectiveMode(requested) : requested;
+                    if (effective === null) throw new WorkspaceError("invalid-params", "Your organization's Codex policy does not allow this permission mode. Choose another mode.");
+                    await route.driver!.setMode(effective);
                     this.assertCurrent(route);
-                    await this.saveMode(route, mode);
+                    await this.saveMode(route, cloudPermissionMode(route.agentId, effective) ?? mode);
                   }
                   if (route.closed || stopping !== route.stopping) return { completion: Promise.resolve<PromptResponse>({ stopReason: "cancelled" }) };
                   route.nativeRunning = true; route.activePermissionMode = route.permissionMode ?? "bypass";

@@ -27,6 +27,7 @@ import {
   permissionForAgentMode,
   nativeModeIdForPosture,
   permissionMenuItems,
+  permissionToggleState,
   agentHasPermissionMenu,
   coerceModeIdForModel,
   staticModesForAgent,
@@ -1163,6 +1164,39 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
         restricted,
       ),
     ).toBe("accept-edits");
+  });
+  it("omits Local modes the live session does not advertise (managed Codex policy)", () => {
+    const advertised = [
+      { id: "auto-edit", name: "Auto-Edit" },
+      { id: "read-only", name: "Read-Only" },
+    ];
+    // Ask is blocked, so its stricter stand-in (read-only, shown as Plan)
+    // takes its place and stays reselectable after switching away.
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, advertised),
+    ).toEqual([{ modeId: "read-only", label: "Plan" }, { modeId: "auto-edit", label: "Approve for me" }]);
+    expect(
+      coerceModeIdForModel("codex", "gpt-5.6-sol", "full-access", null, undefined, advertised),
+    ).toBe("auto-edit");
+    // Nothing offered is as strict as Ask: the blocked choice stays visible
+    // instead of silently becoming a looser mode.
+    expect(
+      coerceModeIdForModel("codex", "gpt-5.6-sol", "ask", null, undefined, [{ id: "auto-edit", name: "Auto-Edit" }, { id: "full-access", name: "Full Access" }]),
+    ).toBe("ask");
+    // Before bind the session advertises nothing; the static vocabulary stays.
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, []).map((i) => i.modeId),
+    ).toEqual(["ask", "auto-edit", "full-access"]);
+  });
+  it("shows a Codex mode managed policy blocks as itself, never as a looser offered mode", () => {
+    const items = permissionMenuItems("codex", "gpt-5.6-sol", null, undefined, [{ id: "auto-edit", name: "Auto-Edit" }, { id: "full-access", name: "Full Access" }]);
+    expect(permissionToggleState("codex", items, "ask")).toEqual({
+      current: { modeId: "ask", label: "Ask for approval" },
+      next: { modeId: "auto-edit", label: "Approve for me" },
+    });
+    // Offered modes cycle as before.
+    expect(permissionToggleState("codex", items, "auto-edit").next.modeId).toBe("full-access");
+    expect(permissionToggleState("claude", permissionMenuItems("claude", "claude-opus-4-8[1m]"), "missing").current.modeId).toBe("default");
   });
   it("agentHasPermissionMenu is true for every native family, false otherwise", () => {
     expect(agentHasPermissionMenu("claude", "claude-haiku-4-5")).toBe(true);

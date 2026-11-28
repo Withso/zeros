@@ -28,6 +28,7 @@ import {
   configuredModelLabelParts,
   effortLabel,
   permissionMenuItems,
+  permissionToggleState,
   resolveModelOption,
 } from "./model-catalog";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
@@ -341,6 +342,7 @@ export function PermissionToggle({
   model,
   boundary = null,
   availableModes,
+  advertisedModes,
   currentModeId,
   onSelectMode,
 }: {
@@ -349,6 +351,8 @@ export function PermissionToggle({
   model: string | null;
   boundary?: ExecutionBoundaryStatus | null;
   availableModes?: readonly SessionMode[];
+  /** The bound Local session's modes; see permissionMenuItems. */
+  advertisedModes?: readonly SessionMode[];
   /** The active native mode id (already coerced to one this model offers —
    *  see coerceModeIdForModel). null pre-bind ⇒ the first mode shows. */
   currentModeId: string | null;
@@ -455,15 +459,12 @@ export function PermissionToggle({
     };
   }, [labelVisible, measureFeedbackPlacement]);
 
-  const items = permissionMenuItems(agentId, model, boundary, availableModes);
+  const items = permissionMenuItems(agentId, model, boundary, availableModes, advertisedModes);
   // No native-mode vocabulary for this agent → no toggle. This check stays
   // below every hook because a chat can switch between supported agents.
   if (items.length === 0) return null;
 
-  let idx = items.findIndex((i) => i.modeId === currentModeId);
-  if (idx < 0) idx = 0;
-  const current = items[idx];
-  const next = items[(idx + 1) % items.length];
+  const { current, next } = permissionToggleState(agentId, items, currentModeId);
   const Icon =
     PERMISSION_MODE_ICONS[agentFamily(agentId)]?.[current.modeId] ?? Shield;
   const dropIn =

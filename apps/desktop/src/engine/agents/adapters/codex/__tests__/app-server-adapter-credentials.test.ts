@@ -25,6 +25,8 @@ const rt = vi.hoisted(() => ({
   /** Thread a boot's `thread/start` creates; resume failures fall back to it. */
   startedThread: (boot: number) => (boot === 0 ? "thread-1" : `thread-${boot + 1}`),
   resumeFailure: null as null | Error,
+  /** Managed `configRequirements/read` answer per boot; unrestricted when null. */
+  requirements: null as null | ((boot: number) => unknown),
 }));
 
 vi.mock("../app-server", () => ({
@@ -41,6 +43,7 @@ vi.mock("../app-server", () => ({
       rt.boots.push(record);
       const request = vi.fn(async (method: string) => {
         if (method === "config/read") return { config: {} };
+        if (method === "configRequirements/read") return rt.requirements?.(boot) ?? { requirements: null };
         if (method === "model/list") return { data: [] };
         return {};
       });
@@ -99,6 +102,7 @@ afterEach(async () => {
   rt.boots = [];
   rt.runTurnImpl = null;
   rt.resumeFailure = null;
+  rt.requirements = null;
 });
 
 function makeAdapter() {
@@ -159,6 +163,22 @@ describe("Codex Local connection changes", () => {
     expect(internal.sessions.get(session.sessionId)?.modeId).toBe("read-only");
     // An in-place restart is not a crash the chat should reconnect from.
     expect(emit.onAgentExit).not.toHaveBeenCalled();
+  });
+
+  it("bounds the live mode, not the spawn-time one, by the new account's managed policy", async () => {
+    // Account B allows on-request with workspace-write only: Ask (untrusted)
+    // and read-only are blocked, Approve for me (auto-edit) is allowed.
+    rt.requirements = (boot) => boot === 0 ? { requirements: null }
+      : { requirements: { allowedApprovalPolicies: ["on-request"], allowedSandboxModes: ["workspace-write"] } };
+    const { adapter, update } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { OPENAI_API_KEY: "old-fixture-key", ZEROS_PERMISSION_MODE: "ask" } });
+    await adapter.setMode({ sessionId: session.sessionId, modeId: "auto-edit" });
+
+    await update(session.sessionId, { OPENAI_API_KEY: "new-fixture-key" });
+
+    expect(rt.boots[1]!.env).toMatchObject({ ZEROS_PERMISSION_MODE: "auto-edit" });
+    const internal = adapter as unknown as { sessions: Map<string, { modeId: string }> };
+    expect(internal.sessions.get(session.sessionId)?.modeId).toBe("auto-edit");
   });
 
   it("lets a running turn finish on its process and switches at the next turn", async () => {
