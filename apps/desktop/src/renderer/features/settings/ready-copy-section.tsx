@@ -5,7 +5,8 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useDocumentActive } from "../../state/use-document-active";
 import { useRecoveringRead } from "../../state/use-recovering-read";
-import { ControlPlaneError } from "../team/control-plane";
+import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
+import { getOrganizationStoreGeneration } from "../team/team-store";
 import { buildCloudReadyCopy, getCloudReadyCopy, getCloudReadyCopyOutput, type CloudReadyCopy } from "../../platform/cloud-github-levels";
 import { message } from "./cloud-computer-store";
 import { relativeAge } from "./cloud-computer-model";
@@ -15,6 +16,10 @@ import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: no ready copies here (setting off, older control plane, or not visible to this reader). */
 export const readyCopyCache = new KeyedAsyncCache<CloudReadyCopy | null>({ maxEntries: 32 });
+/** The server decides per person who may see a ready copy; the organization
+ * store generation changes with the account, so one never paints another's. */
+export const readyCopyKey = (organizationId: string, projectId: string) =>
+  JSON.stringify([CONTROL_PLANE_URL, getOrganizationStoreGeneration(), organizationId, projectId]);
 const absent = (error: unknown) => { if (error instanceof ControlPlaneError && error.status === 404) return null; throw error; };
 const later = (iso: string | null, now: number) => {
   if (!iso) return null;
@@ -54,7 +59,7 @@ const duration = (start: string | null, end: string | null) => {
 
 /** A project's ready copy on its project page, for whoever the server lets see it. */
 export function ReadyCopySection({ organizationId, projectId, active }: { organizationId: string; projectId: string; active: boolean }) {
-  const key = JSON.stringify([organizationId, projectId]);
+  const key = readyCopyKey(organizationId, projectId);
   const read = useRecoveringRead(readyCopyCache, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<{ generation: number; text: string } | null>(null);

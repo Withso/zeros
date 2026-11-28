@@ -498,6 +498,7 @@ export function InspectorEditField({
     distance: number;
     moved: boolean;
   } | null>(null);
+  const arrowSequenceRef = useRef<{ start: string } | null>(null);
   const previewFrameRef = useRef<number | null>(null);
   /** The newest value asked for while this frame's preview already left. */
   const pendingPreviewRef = useRef<string | null>(null);
@@ -1033,6 +1034,7 @@ export function InspectorEditField({
             ) {
               return;
             }
+            arrowSequenceRef.current = null;
             void commit();
           }}
           aria-keyshortcuts={tokensOffered ? "Alt+ArrowDown" : undefined}
@@ -1054,7 +1056,7 @@ export function InspectorEditField({
               mixedStepsRef.current = next;
               mixedSteps.preview(next.steps, next.fine);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-              const normalized = resolveDraft(draft, baselineRef.current);
+              const normalized = resolveDraft(draftRef.current, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
               const start = parseDesignStyleNumericParts(normalized)
                 ? normalized
@@ -1067,7 +1069,10 @@ export function InspectorEditField({
               );
               if (next !== null) {
                 event.preventDefault();
-                setPresentedDraft(withinRange(next));
+                arrowSequenceRef.current ??= { start: baselineRef.current };
+                const resolved = withinRange(next);
+                setPresentedDraft(resolved);
+                preview(resolved);
               }
             } else if (
               event.key === "Backspace" &&
@@ -1089,6 +1094,8 @@ export function InspectorEditField({
             } else if (event.key === "Escape") {
               event.preventDefault();
               skipCommitRef.current = true;
+              const sequenceStart = arrowSequenceRef.current?.start;
+              arrowSequenceRef.current = null;
               // A preceding commit can publish its authoritative computed
               // value while this input is focused. The synchronization effect
               // deliberately leaves an active draft alone, so the focus-time
@@ -1096,7 +1103,7 @@ export function InspectorEditField({
               // declaration). Escape must restore the latest exact-key value
               // from props; once we blur there may be no further value change
               // to trigger the effect again.
-              const restored = String(value);
+              const restored = sequenceStart ?? String(value);
               baselineRef.current = restored;
               setPresentedDraft(restored);
               cancelPreview();
@@ -1113,6 +1120,14 @@ export function InspectorEditField({
               input.blur();
               window.requestAnimationFrame(() => viewport?.focus({ preventScroll: true }));
             }
+          }}
+          onKeyUp={(event) => {
+            if (
+              (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+              !arrowSequenceRef.current
+            ) return;
+            arrowSequenceRef.current = null;
+            void commitRef.current?.(draftRef.current);
           }}
         />
         )}

@@ -711,6 +711,13 @@ describe("design workspace interaction wiring", () => {
       `--design-spacing-line-border: ${DESIGN_WHITE}`,
     );
     expect(semanticTokensSource).toContain("--design-selection-handle-fill:");
+    const radiusHandle = /\.zd-design-radius-handle \{([^}]*)\}/.exec(uiSource)?.[1] ?? "";
+    expect(radiusHandle).toContain("background: var(--design-selection-handle-fill)");
+    expect(radiusHandle).not.toContain("var(--bg1)");
+    const componentSelection = /\[data-design-frame-component\]\[data-design-frame-root-selected\] \{([^}]*)\}/
+      .exec(uiSource)?.[1] ?? "";
+    expect(componentSelection).toContain("--design-selection-stroke:");
+    expect(componentSelection).not.toContain("--design-selection-handle-fill:");
     expect(uiSource).toContain(".zd-design-selection-outline");
     expect(uiSource).toContain(".zd-design-selection-handle");
     expect(uiSource).toContain("var(--design-padding-stroke)");

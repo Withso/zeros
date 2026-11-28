@@ -12,7 +12,8 @@ import {
 } from "../pending-workspaces";
 import { selectActiveFolder, useWorkspaceStore } from "../store";
 import { peekWorkspacesFor, setWorkspaceRowsForTesting } from "../use-projects";
-import { setSidebarGroupHidden, setSidebarGroupOrder, setSidebarRepositoryIds, setSidebarWorkspaceSort } from "../sidebar-list-preferences";
+import { resetSidebarView, setSidebarGroupHidden, setSidebarGroupOrder, setSidebarRepositoryIds, setSidebarView, setSidebarWorkspaceSort } from "../sidebar-list-preferences";
+import { useComposerDraftPresence } from "../composer-draft-presence";
 import {
   workspaceArchive,
   workspaceDelete,
@@ -161,6 +162,47 @@ describe("sidebar archive presentation", () => {
       expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(other.path);
       expect(peekWorkspacesFor("other")).toEqual([other]);
     } finally { setWorkspaceRowsForTesting("other", []); }
+  });
+
+  // View filters take rows out of the sidebar too. With Draft only, the row
+  // nearest the archived one has no draft; removal lands on the next row the
+  // sidebar actually lists.
+  it("repoints only to a workspace the View filters keep", async () => {
+    setSidebarWorkspaceSort("created");
+    setSidebarView({ draftOnly: true });
+    // Chats persist their drafts on a window timer.
+    vi.stubGlobal("window", globalThis);
+    useWorkspaceStore.setState({
+      chats: [{ id: "draft-right", folder: right.path, archived: false, createdAt: 1, title: "Draft" } as never],
+    });
+    useComposerDraftPresence.setState(new Set(["draft-right"]), true);
+    vi.mocked(workspaceArchive).mockResolvedValue(result());
+    try {
+      await archiveWorkspaceWithFeedback(target, dispatch);
+      // Created paints left, target, right; only right passes Draft only.
+      expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(right.path);
+    } finally {
+      resetSidebarView(["draftOnly"]);
+      useComposerDraftPresence.setState(new Set(), true);
+      useWorkspaceStore.setState({ chats: [] });
+    }
+  });
+
+  // Every grouping's hidden groups count, not only repositories': under
+  // Group › Status with Idle hidden, the only listed survivor needs you.
+  it("never repoints into a hidden Status group", async () => {
+    const failing = { ...right, setupState: "failed" as const };
+    setWorkspaceRowsForTesting(target.repoSlug, [left, target, failing]);
+    // Group › Status is the list filter's "status" grouping.
+    useWorkspaceStore.setState({ workspaceListFilter: "status" });
+    setSidebarGroupHidden("status", "idle", true);
+    vi.mocked(workspaceArchive).mockResolvedValue(result());
+    try {
+      await archiveWorkspaceWithFeedback(target, dispatch);
+      expect(selectActiveFolder(useWorkspaceStore.getState())).toBe(failing.path);
+    } finally {
+      setSidebarGroupHidden("status", "idle", false);
+    }
   });
 
   // A repository hidden from the Group menu is out of the sidebar, so removal
