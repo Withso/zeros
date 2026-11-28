@@ -565,6 +565,21 @@ it("holds changed picture demand until camera input rests", async () => {
   expect(renders[1].maxDimension).toBe(1280);
 });
 
+it("publishes deferred demand when quiet expires while it is scheduled", async () => {
+  const quietMs = vi.fn()
+    .mockReturnValueOnce(1)
+    .mockReturnValueOnce(0)
+    .mockReturnValue(0);
+  const { previews, renders, settle, advance, token } = harness({ quietMs });
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  expect(renders).toHaveLength(1);
+
+  previews.setDemand(token, demand(local, [["a.html", 1, "detail"]]));
+  await advance(500);
+  expect(renders).toHaveLength(2);
+});
+
 it("drops a deferred demand when its canvas clears it", async () => {
   let quiet = 0;
   const { previews, renders, settle, advance, token } = harness({ quietMs: () => quiet });

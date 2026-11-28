@@ -573,10 +573,11 @@ export class DesignFramePreviews {
     }
     const replacing = this.demandToken === token && this.demand !== null &&
       sameOwner(this.demand.owner, demand.owner) && this.demand.theme === demand.theme;
-    if (replacing && (this.deps.quietMs?.() ?? 0) > 0) {
+    const quiet = this.deps.quietMs?.() ?? 0;
+    if (replacing && quiet > 0) {
       if (!(this.deferredDemand?.token === token && sameDemand(this.deferredDemand.demand, demand))) {
         this.deferredDemand = { token, demand };
-        this.scheduleDeferredDemand();
+        this.scheduleDeferredDemand(quiet);
       }
       return;
     }
@@ -600,10 +601,8 @@ export class DesignFramePreviews {
     this.pump();
   }
 
-  private scheduleDeferredDemand(): void {
-    if (this.deferredDemandTimer !== null) return;
-    const quiet = this.deps.quietMs?.() ?? 0;
-    if (quiet <= 0) return;
+  private scheduleDeferredDemand(quiet = this.deps.quietMs?.() ?? 0): void {
+    if (this.deferredDemandTimer !== null || quiet <= 0) return;
     this.deferredDemandTimer = this.deps.setTimer(() => {
       this.deferredDemandTimer = null;
       const deferred = this.deferredDemand;
