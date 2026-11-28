@@ -26,6 +26,8 @@ export const sharedGithubTarget = z.object({
   organizationId: z.string().uuid(),
   userId: z.string().uuid(),
   expected: z.string().regex(/^[a-f0-9]{64}$/),
+  /** Only against a control plane reporting `workspaceSelection`: Cloud keeps its selected method. */
+  keepSelection: z.literal(true).optional(),
 }).strict();
 export type SharedGithubTarget = z.infer<typeof sharedGithubTarget>;
 
@@ -431,7 +433,8 @@ export class GithubAppClient {
     shared?: SharedGithubTarget,
   ): Promise<GithubAppTokenResult> {
     const value = await this.request(accessToken, "/v1/github/oauth/exchange", { nonce,
-      ...(shared ? { shared: { organizationId: shared.organizationId, expected: shared.expected } } : {}) });
+      ...(shared ? { shared: { organizationId: shared.organizationId, expected: shared.expected,
+        ...(shared.keepSelection ? { keepSelection: true } : {}) } } : {}) });
     if (shared && record(value).shared !== true) throw new Error("Update the control plane to connect GitHub for Local and Cloud.");
     return parseTokenResult(value, true, this.now());
   }

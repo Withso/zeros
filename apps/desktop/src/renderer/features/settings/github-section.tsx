@@ -439,11 +439,15 @@ export function GitHubSection({
     });
     try {
       const target = options?.forceInstall ? "shared" : place;
+      // A control plane with workspace selection saves Cloud's App from the same grant without
+      // selecting it; older ones need the in-memory Cloud PAT restore.
+      const keepCloud = target === "local" && !!owner && shared.read.data?.workspaceSelection === true;
       const started = await connectSettingsGithubApp({
         ...connectOptions,
         ...(target === "cloud" ? { preserveSelectedMethod: true } : {}),
-        ...(owner && (target !== "local" || confirmedCloudMethod) ? { shared: shared.target() } : {}),
-      }, target === "local" && confirmedCloudMethod === "pat");
+        ...(keepCloud ? { shared: { ...shared.target(), keepSelection: true as const } }
+          : owner && (target !== "local" || confirmedCloudMethod) ? { shared: shared.target() } : {}),
+      }, !keepCloud && target === "local" && confirmedCloudMethod === "pat");
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -637,6 +641,22 @@ export function GitHubSection({
     return !status.configured && status.health === "not-connected";
   }) && (!owner || (cloud && !cloud.methods.pat.configured && !cloud.methods["github-app"].configured));
   const List = workspaceIdentity ? SettingsList : "div";
+  // Stop using GitHub in one place without deleting any saved credential.
+  const clearLocal = async () => {
+    setBusyMethod(snapshot.selectedMethod);
+    try {
+      if (snapshot.selectedMethod !== "gh-cli") ghAuthStatusCache.setData(authKey, await ghMethodSelect("gh-cli", accountId));
+      ghAuthStatusCache.setData(authKey, (await ghMethodDisconnect("gh-cli", accountId)).snapshot);
+    } catch (error) {
+      toast.error("Couldn’t stop using GitHub on this Mac", { description: errorMessage(error) });
+    } finally { setBusyMethod(null); }
+  };
+  const clearCloud = async () => {
+    setBusyMethod("github-app");
+    try { await shared.change({ action: "deselect" }); invalidateCloud(); }
+    catch (error) { toast.error("Couldn’t stop using GitHub in Cloud", { description: errorMessage(error) }); }
+    finally { setBusyMethod(null); }
+  };
   // In the card, each detail is its own divided row; the legacy cards draw their own rule.
   const detailCls = workspaceIdentity ? "flex min-w-0 flex-col gap-2.5"
     : "border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3";
@@ -648,12 +668,13 @@ export function GitHubSection({
           <GithubWorkspaceMethod place="local" methods={localMethods}
             method={local.configured && localMethods.includes(local.method) ? local.method : null}
             hint={local.login ? `@${local.login}` : "On this Mac"} disabled={!hasConfirmedSnapshot || busyMethod !== null || appWaiting}
-            onChoose={method => void selectMethod(method, "local")} />
+            onChoose={method => void selectMethod(method, "local")} onClear={() => void clearLocal()} />
           {owner && <GithubWorkspaceMethod place="cloud" organization={personalCloud ? undefined : owner.name}
             methods={["github-app", "pat"]} method={cloud?.selectedMethod ?? null}
             hint={selectedCloud?.login ? `@${selectedCloud.login}` : cloud ? "No account in use" : shared.read.readError ? "Cloud method unavailable" : "Loading Cloud method…"}
             disabled={!cloud || !!shared.read.readError || busyMethod !== null || appWaiting}
-            onChoose={method => void selectMethod(method, "cloud")} />}
+            onChoose={method => void selectMethod(method, "cloud")}
+            onClear={cloud?.workspaceSelection ? () => void clearCloud() : undefined} />}
         </SettingsGroup>
       )}
       {firstRun && !onboarding ? (

@@ -71,6 +71,9 @@ export function createCloudGithubConnectionRoutes(
         case "disconnect":
           await service.store.disconnect(scope, input.expected, input.method);
           break;
+        case "deselect":
+          await service.store.deselect(scope, input.expected);
+          break;
       }
       return c.json(
         CloudGithubConnectionStatusSchema.parse(await service.status(scope)),

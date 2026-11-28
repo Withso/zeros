@@ -207,6 +207,22 @@ describe("GitHub App control-plane client", () => {
     });
   });
 
+  it.each([true, undefined] as const)("sends keepSelection on a shared exchange only when asked (%s)", async keepSelection => {
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({
+      accessToken: "app-access", refreshToken: "app-refresh", refreshBinding: validRefreshBinding,
+      expiresAtMs: 5_000_000, refreshTokenExpiresAtMs: 50_000_000, login: "octocat", variantKey: "github.com",
+      installationsComplete: true, installations: [], shared: true,
+    }));
+    const client = new GithubAppClient({ baseUrl: "https://api.zeros.test", fetch: fetch as unknown as typeof globalThis.fetch, now: () => 1_000_000 });
+    await client.exchange("auth-access", "n".repeat(43), {
+      organizationId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002",
+      expected: "a".repeat(64), ...(keepSelection ? { keepSelection } : {}),
+    });
+    const body = JSON.parse(String(fetch.mock.calls[0]![1]!.body)) as { shared: Record<string, unknown> };
+    expect(body.shared).toEqual({ organizationId: "00000000-0000-4000-8000-000000000001", expected: "a".repeat(64),
+      ...(keepSelection ? { keepSelection: true } : {}) });
+  });
+
   it("rejects a token pair that cannot be rotated before it expires", async () => {
     const client = new GithubAppClient({
       baseUrl: "https://api.zeros.test",

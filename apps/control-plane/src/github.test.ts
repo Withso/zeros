@@ -684,6 +684,32 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect((await store.status(scope)).selectedMethod).toBe("pat");
   });
 
+  it("keeps Cloud's selected method when a shared exchange asks to", async ({ onTestFinished }) => {
+    const user = await ensureUser(pool, {
+      provider: "workos", providerSubject: randomUUID(),
+      email: `keep-${randomUUID()}@example.test`, displayName: "Personal",
+    });
+    const org = (await pool.query<{ id: string }>("SELECT id FROM organizations WHERE created_by=$1 AND is_personal", [user.id])).rows[0]!.id;
+    const scope = { organizationId: org, userId: user.id };
+    configureCloudPersonal(pool, true);
+    onTestFinished(() => configureCloudPersonal(pool, false));
+    await grantTestPro(pool, user.id);
+    const store = new CloudGithubConnectionStore(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 5).toString("base64url") } });
+    const remote = githubFetch([]), service = new CloudGithubConnections(store, githubConfig, remote);
+    await service.connectPat(scope, await store.fingerprint(scope), "synthetic-personal-access-token");
+    const app = testApp(pool, user, { fetch: remote, cloudGithub: service });
+    const nonce = "keepsel".repeat(7).slice(0, 48), started = await startFlow(app, nonce, false);
+    expect((await callback(app, started.state)).status).toBe(302);
+    const exchange = await app.request("/v1/github/oauth/exchange", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nonce, shared: { organizationId: org, expected: await store.fingerprint(scope), keepSelection: true } }),
+    });
+    expect(exchange.status).toBe(200);
+    const status = await store.status(scope);
+    expect(status.selectedMethod).toBe("pat");
+    expect(status.methods["github-app"].configured).toBe(true);
+  });
+
   it("rejects a pending shared App exchange after disconnecting an empty Cloud slot", async () => {
     const user = await ensureUser(pool, {
       provider: "workos", providerSubject: randomUUID(),

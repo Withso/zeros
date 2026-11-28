@@ -1479,7 +1479,9 @@ export function createGithubRoutes(
       const expiresAtMs = new Date(row.access_token_expires_at).getTime();
       let sharedApp: RefreshBindingPayload["sharedApp"];
       if (body.shared !== undefined) {
-        const shared = parse(z.object({ organizationId: z.string().uuid(), expected: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), body.shared);
+        const shared = parse(z.object({ organizationId: z.string().uuid(), expected: z.string().regex(/^[a-f0-9]{64}$/),
+          /** Setup started from the Mac's row: save Cloud's App without changing Cloud's selected method. */
+          keepSelection: z.literal(true).optional() }).strict(), body.shared);
         if (!dependencies.cloudGithub) throw new HttpError(503, "github_not_configured", "Cloud GitHub is unavailable.");
         const identity = await githubUser(fetchImpl, config, accessToken);
         const credentialId = await dependencies.cloudGithub.store.save(
@@ -1491,6 +1493,7 @@ export function createGithubRoutes(
             expiresAt: expiresAtMs, refreshExpiresAt: refreshTokenExpiresAtMs,
           },
           tx => assertLiveAuthorization(tx, grant, true),
+          shared.keepSelection ? { select: false } : {},
         );
         sharedApp = { organizationId: shared.organizationId, credentialId };
         // The rotating GitHub refresh token has one writer. The Mac holds a random
